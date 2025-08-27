@@ -60,8 +60,65 @@ fn bc0() {
     println!("result: {res}");
 }
 
+
+fn skolemize_test() {
+    let mut s = Space::new();
+
+    const SPACE_EXPRS: &str = r#"
+    (premise (Pred1 &a &c))
+    (conclusio (Pred2 &a &b))
+
+    ((step tospace)
+      (, (premise ($x $a)))
+      (, (ps $a)))
+
+    ((step tospace)
+      (, (conclusion ($x $a $b)))
+      (, (cl $a) (cl $b)))
+
+    ((step map)
+     (, (ps $a) (cl $a))
+     (, (out $a $a)))
+
+    ((step map)
+     (, (ps $a) (cl $a))
+     (, (out $a $a)))
+
+     ((step fromspace)
+      (, (conclusion ($x $a $b)) (out $a $na) (out $b $nb)
+      (, (fcls ($a $na $nb)))
+     )
+
+    (exec zealous
+            (, ((step $x) $p0 $t0)
+               (exec zealous $p1 $t1) )
+            (, (exec $x $p0 $t0)
+               (exec zealous $p1 $t1) ))
+    "#;
+
+    s.load_all_sexpr(SPACE_EXPRS.as_bytes()).unwrap();
+
+    let mut t0 = Instant::now();
+    let steps = s.metta_calculus(47);
+    println!("elapsed {} steps {} size {}", t0.elapsed().as_millis(), steps, s.btm.val_count());
+
+    let mut v = vec![];
+    s.dump_sexpr(expr!(s, "[2] ev [3] : $ C"), expr!(s, "_1"), &mut v);
+    let res = String::from_utf8(v).unwrap();
+
+    println!("result: {res}");
+}
+
 fn main() {
     env_logger::init();
 
     bc0();
 }
+
+
+(Pre &a) (Pre2 &a &b)
+
+&a
+
+&a -> &a
+&b -> (f &a)
