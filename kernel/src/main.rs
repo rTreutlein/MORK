@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 // use std::future::Future;
 // use std::task::Poll;
 use std::time::Instant;
@@ -89,9 +88,9 @@ fn skolemize_test() {
      (, (out $a $a))
     )
 
-    ((step map)
-     (, (ps $a) (cl $b) (not $a $b))
-     (, (out $b (f $a)))
+    ((step map2)
+     (, (ps $u1) (ps $u2) (cl $b) (not $u1 $b) (not $u2 $b) (not $u1 $u2))
+     (, (out $b (f $u1 $u2)))
     )
 
     ((step fs)
@@ -112,22 +111,11 @@ fn skolemize_test() {
     let steps = s.metta_calculus(102);
     println!("elapsed {} steps {} size {}", t0.elapsed().as_millis(), steps, s.btm.val_count());
 
-    // Deduplicate only the fcls results to avoid multiple outputs from multiple (out ...) mappings.
     let mut v = vec![];
-    // Query only fcls expressions
     s.dump_sexpr(expr!(s, "[2] fcls $"), expr!(s, "_1"), &mut v);
     let res = String::from_utf8(v).unwrap();
 
-    let mut seen = HashSet::new();
-    let mut dedup = String::new();
-    for line in res.lines() {
-        if seen.insert(line.to_string()) {
-            dedup.push_str(line);
-            dedup.push('\n');
-        }
-    }
-
-    println!("result:\n{dedup}");
+    println!("result:\n{res}");
 }
 
 fn main() {
