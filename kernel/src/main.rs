@@ -66,28 +66,38 @@ fn skolemize_test() {
 
     const SPACE_EXPRS: &str = r#"
     (premise (Pred1 &a &c))
-    (conclusio (Pred2 &a &b))
+    (conclusion (Pred2 &a &b))
 
     ((step tospace)
       (, (premise ($x $a)))
       (, (ps $a)))
 
     ((step tospace)
+      (, (premise ($x $a $b)))
+      (, (ps $a) (ps $b)))
+
+    ((step tospace)
       (, (conclusion ($x $a $b)))
       (, (cl $a) (cl $b)))
 
-    ((step map)
-     (, (ps $a) (cl $a))
-     (, (out $a $a)))
+    (not &a &b)
+    (not &a &c)
+    (not &c &b)
 
     ((step map)
      (, (ps $a) (cl $a))
-     (, (out $a $a)))
+     (, (out $a $a))
+    )
 
-     ((step fromspace)
-      (, (conclusion ($x $a $b)) (out $a $na) (out $b $nb)
-      (, (fcls ($a $na $nb)))
-     )
+    ((step map)
+     (, (ps $a) (cl $b) (not $a $b))
+     (, (out $b (f $a)))
+    )
+
+    ((step fs)
+      (, (conclusion ($x $a $b)) (out $a $na) (out $b $nb))
+      (, (fcls ($x $na $nb)))
+    )
 
     (exec zealous
             (, ((step $x) $p0 $t0)
@@ -99,26 +109,18 @@ fn skolemize_test() {
     s.load_all_sexpr(SPACE_EXPRS.as_bytes()).unwrap();
 
     let mut t0 = Instant::now();
-    let steps = s.metta_calculus(47);
+    let steps = s.metta_calculus(102);
     println!("elapsed {} steps {} size {}", t0.elapsed().as_millis(), steps, s.btm.val_count());
 
     let mut v = vec![];
-    s.dump_sexpr(expr!(s, "[2] ev [3] : $ C"), expr!(s, "_1"), &mut v);
+    s.dump_all_sexpr(&mut v).unwrap();
     let res = String::from_utf8(v).unwrap();
 
-    println!("result: {res}");
+    println!("result:\n{res}");
 }
 
 fn main() {
     env_logger::init();
 
-    bc0();
+    skolemize_test();
 }
-
-
-(Pre &a) (Pre2 &a &b)
-
-&a
-
-&a -> &a
-&b -> (f &a)
