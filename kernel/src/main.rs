@@ -62,62 +62,61 @@ fn bc0() {
 
 
 fn skolemize_sexp(premise_src: &str, conclusion_src: &str, f_name: &str) -> Result<String, String> {
-    // Parse a single SExp from a string
-    fn parse_one(src: &str) -> Result<SExp<'_>, String> {
-        let mut ctx = ParseContext::new(src);
-        SExp::parse(&mut ctx).map_err(|e| format!("{:?}", e))
-    }
+    // Keep parse contexts alive while SExp borrows from them.
+    let mut pctx = ParseContext::new(premise_src);
+    let premise = SExp::parse(&mut pctx).map_err(|e| format!("{:?}", e))?;
+    let mut cctx = ParseContext::new(conclusion_src);
+    let conclusion = SExp::parse(&mut cctx).map_err(|e| format!("{:?}", e))?;
 
-    // Encode SExp back to a String using its own printer
-    fn encode_to_string(e: &SExp<'_>) -> String {
-        let mut v = Vec::new();
-        e.encode(&mut v).expect("SExp::encode failed");
-        String::from_utf8(v).expect("utf8")
-    }
-
-    let premise = parse_one(premise_src)?;
-    let conclusion = parse_one(conclusion_src)?;
-
-    // Collect universals: the atoms (starting with '&') that appear as arguments in the premise
-    let mut universals: Vec<String> = Vec::new();
-    match premise {
+    // Collect universals: atoms starting with '&' that appear as arguments in the premise.
+    let mut universals: Vec<&str> = Vec::new();
+    match &premise {
         SExp::List(items) if items.len() >= 1 => {
             for arg in &items[1..] {
-                let s = encode_to_string(arg);
-                if s.starts_with('&') {
-                    universals.push(s);
+                if let SExp::Atom(s) = arg {
+                    if s.starts_with('&') {
+                        universals.push(*s);
+                    }
                 }
             }
         }
         _ => return Err("premise must be a non-empty list".into()),
     }
 
-    // Transform the conclusion by replacing any existential (var not in universals) with f(universals...)
-    let (head_str, args): (String, Vec<String>) = match conclusion {
+    // Transform the conclusion by replacing any existential (var not in universals)
+    // with f(universals...).
+    let (head, args_out): (&str, Vec<String>) = match &conclusion {
         SExp::List(items) if !items.is_empty() => {
-            let head_str = encode_to_string(&items[0]);
-            let mut args_out = Vec::with_capacity(items.len().saturating_sub(1));
+            let head = match &items[0] {
+                SExp::Atom(s) => *s,
+                _ => return Err("conclusion head must be an atom".into()),
+            };
+            let mut out = Vec::with_capacity(items.len().saturating_sub(1));
             for arg in &items[1..] {
-                let s = encode_to_string(arg);
-                if s.starts_with('&') && !universals.iter().any(|u| u == &s) {
-                    if universals.is_empty() {
-                        args_out.push(format!("({})", f_name));
-                    } else {
-                        args_out.push(format!("({} {})", f_name, universals.join(" ")));
+                match arg {
+                    SExp::Atom(s) => {
+                        if s.starts_with('&') && !universals.iter().any(|u| u == s) {
+                            if universals.is_empty() {
+                                out.push(format!("({})", f_name));
+                            } else {
+                                out.push(format!("({} {})", f_name, universals.join(" ")));
+                            }
+                        } else {
+                            out.push((*s).to_string());
+                        }
                     }
-                } else {
-                    args_out.push(s);
+                    _ => return Err("only atomic arguments supported in conclusion".into()),
                 }
             }
-            (head_str, args_out)
+            (head, out)
         }
         _ => return Err("conclusion must be a non-empty list".into()),
     };
 
-    let result = if args.is_empty() {
-        format!("({})", head_str)
+    let result = if args_out.is_empty() {
+        format!("({})", head)
     } else {
-        format!("({} {})", head_str, args.join(" "))
+        format!("({} {})", head, args_out.join(" "))
     };
 
     Ok(result)
