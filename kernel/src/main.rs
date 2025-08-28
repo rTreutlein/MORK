@@ -121,5 +121,7 @@ fn skolemize_test() {
 fn main() {
     env_logger::init();
 
-    skolemize_test();
+    //skolemize_test();
+
+    sexpr!("(Hello (A B))");
 }
