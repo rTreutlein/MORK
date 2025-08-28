@@ -180,9 +180,6 @@ fn skolemize_test() {
 
     println!("result:\n{res}");
 
-    // Compare with pure-Rust Skolemization using SExp (no Space involved)
-    let pure = skolemize_sexp("(Pred1 &a &c)", "(Pred2 &a &b)", "f").expect("skolemize_sexp");
-    println!("pure-result:\n{pure}");
 }
 
 fn main() {
@@ -190,5 +187,9 @@ fn main() {
 
     //skolemize_test();
 
-    sexpr!("(Hello (A B))");
+    //sexpr!("(Hello (A B))");
+    //
+    // Compare with pure-Rust Skolemization using SExp (no Space involved)
+    let pure = skolemize_sexp("(Pred1 &a &c)", "(Pred2 &a &b)", "f").expect("skolemize_sexp");
+    println!("pure-result:\n{pure}");
 }
