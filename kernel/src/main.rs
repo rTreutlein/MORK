@@ -8,6 +8,7 @@ use mork::{expr, prefix, sexpr};
 use mork::prefix::Prefix;
 use mork::space::Space;
 use mork_bytestring::{item_byte, Tag};
+use mork_frontend::rosetta_parser::{SExp, ParseContext};
 
 fn bc0() {
     let mut s = Space::new();
@@ -59,6 +60,68 @@ fn bc0() {
     println!("result: {res}");
 }
 
+
+fn skolemize_sexp(premise_src: &str, conclusion_src: &str, f_name: &str) -> Result<String, String> {
+    // Parse a single SExp from a string
+    fn parse_one(src: &str) -> Result<SExp<'_>, String> {
+        let mut ctx = ParseContext::new(src);
+        SExp::parse(&mut ctx).map_err(|e| format!("{:?}", e))
+    }
+
+    // Encode SExp back to a String using its own printer
+    fn encode_to_string(e: &SExp<'_>) -> String {
+        let mut v = Vec::new();
+        e.encode(&mut v).expect("SExp::encode failed");
+        String::from_utf8(v).expect("utf8")
+    }
+
+    let premise = parse_one(premise_src)?;
+    let conclusion = parse_one(conclusion_src)?;
+
+    // Collect universals: the atoms (starting with '&') that appear as arguments in the premise
+    let mut universals: Vec<String> = Vec::new();
+    match premise {
+        SExp::List(items) if items.len() >= 1 => {
+            for arg in &items[1..] {
+                let s = encode_to_string(arg);
+                if s.starts_with('&') {
+                    universals.push(s);
+                }
+            }
+        }
+        _ => return Err("premise must be a non-empty list".into()),
+    }
+
+    // Transform the conclusion by replacing any existential (var not in universals) with f(universals...)
+    let (head_str, args): (String, Vec<String>) = match conclusion {
+        SExp::List(items) if !items.is_empty() => {
+            let head_str = encode_to_string(&items[0]);
+            let mut args_out = Vec::with_capacity(items.len().saturating_sub(1));
+            for arg in &items[1..] {
+                let s = encode_to_string(arg);
+                if s.starts_with('&') && !universals.iter().any(|u| u == &s) {
+                    if universals.is_empty() {
+                        args_out.push(format!("({})", f_name));
+                    } else {
+                        args_out.push(format!("({} {})", f_name, universals.join(" ")));
+                    }
+                } else {
+                    args_out.push(s);
+                }
+            }
+            (head_str, args_out)
+        }
+        _ => return Err("conclusion must be a non-empty list".into()),
+    };
+
+    let result = if args.is_empty() {
+        format!("({})", head_str)
+    } else {
+        format!("({} {})", head_str, args.join(" "))
+    };
+
+    Ok(result)
+}
 
 fn skolemize_test() {
     let mut s = Space::new();
@@ -116,6 +179,10 @@ fn skolemize_test() {
     let res = String::from_utf8(v).unwrap();
 
     println!("result:\n{res}");
+
+    // Compare with pure-Rust Skolemization using SExp (no Space involved)
+    let pure = skolemize_sexp("(Pred1 &a &c)", "(Pred2 &a &b)", "f").expect("skolemize_sexp");
+    println!("pure-result:\n{pure}");
 }
 
 fn main() {
