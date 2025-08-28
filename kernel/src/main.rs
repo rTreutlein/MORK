@@ -73,7 +73,7 @@ fn skolemize_sexp(premise_src: &str, conclusion_src: &str, f_name: &str) -> Resu
     match &premise {
         SExp::List(items) if items.len() >= 1 => {
             for arg in &items[1..] {
-                if let SExp::Atom(s) = arg {
+                if let SExp::Symbol(s) = arg {
                     if s.starts_with('&') {
                         universals.push(*s);
                     }
@@ -88,13 +88,13 @@ fn skolemize_sexp(premise_src: &str, conclusion_src: &str, f_name: &str) -> Resu
     let (head, args_out): (&str, Vec<String>) = match &conclusion {
         SExp::List(items) if !items.is_empty() => {
             let head = match &items[0] {
-                SExp::Atom(s) => *s,
+                SExp::Symbol(s) => *s,
                 _ => return Err("conclusion head must be an atom".into()),
             };
             let mut out = Vec::with_capacity(items.len().saturating_sub(1));
             for arg in &items[1..] {
                 match arg {
-                    SExp::Atom(s) => {
+                    SExp::Symbol(s) => {
                         if s.starts_with('&') && !universals.iter().any(|u| u == s) {
                             if universals.is_empty() {
                                 out.push(format!("({})", f_name));
