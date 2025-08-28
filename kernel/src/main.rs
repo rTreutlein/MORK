@@ -112,11 +112,22 @@ fn skolemize_test() {
     let steps = s.metta_calculus(102);
     println!("elapsed {} steps {} size {}", t0.elapsed().as_millis(), steps, s.btm.val_count());
 
+    // Deduplicate only the fcls results to avoid multiple outputs from multiple (out ...) mappings.
     let mut v = vec![];
-    s.dump_all_sexpr(&mut v).unwrap();
+    // Query only fcls expressions
+    s.dump_sexpr(expr!(s, "[2] fcls $"), expr!(s, "_1"), &mut v);
     let res = String::from_utf8(v).unwrap();
 
-    println!("result:\n{res}");
+    let mut seen = HashSet::new();
+    let mut dedup = String::new();
+    for line in res.lines() {
+        if seen.insert(line.to_string()) {
+            dedup.push_str(line);
+            dedup.push('\n');
+        }
+    }
+
+    println!("result:\n{dedup}");
 }
 
 fn main() {
