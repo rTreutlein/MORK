@@ -61,6 +61,96 @@ fn bc0() {
 }
 
 
+fn bc1() {
+    let mut s = Space::new();
+
+    const SPACE_EXPRS: &str = r#"
+    ((step base)
+      (, (goal (: $proof $conclusion)) (kb (: $proof $conclusion)))
+      (, (ev (: $proof $conclusion) ) ))
+
+    ((step abs)
+      (, (goal (: $proof $conclusion)) (kb $rule) ($rule in $arg) ($rule out (: $proof $conclusion)))
+      (, (goal $arg) (ev $rule) ))
+
+    ((step app)
+     (, (ev $rule) (ev $a) (ev $b) ($rule app ($a $b) $ccls))
+     (, (ev $ccls) ))
+
+    (exec zealous
+            (, ((step $x) $p0 $t0)
+               (exec zealous $p1 $t1) )
+            (, (exec $x $p0 $t0)
+               (exec zealous $p1 $t1) ))
+    "#;
+
+    const KB_EXPRS: &str = r#"
+    (kb (: a A))
+    (kb (: a B))
+    (kb ab_c)
+    (ab_c in (: $a A))
+    (ab_c in (: $b B))
+    (ab_c out (: (ab_c $a $b) C))
+    (ab_c app ((: $a A) (: $b B)) (: (ab_c $a $b) C))
+
+    (goal (: $proof C))
+    "#;
+
+    s.load_all_sexpr(SPACE_EXPRS.as_bytes()).unwrap();
+    s.load_all_sexpr(KB_EXPRS.as_bytes()).unwrap();
+
+    let mut t0 = Instant::now();
+    let steps = s.metta_calculus(47);
+    println!("elapsed {} steps {} size {}", t0.elapsed().as_millis(), steps, s.btm.val_count());
+
+    let mut v = vec![];
+    s.dump_all_sexpr(&mut v).unwrap();
+    let res = String::from_utf8(v).unwrap();
+
+    println!("result: {res}");
+}
+
+
+fn cc0() {
+    let mut s = Space::new();
+
+    const SPACE_EXPRS: &str = r#"
+    ((step base)
+      (, (add (: $prf (Implication $a $b) $itv)))
+      (, (in $a) (out $b) (-> (: $prfa $a $atv) (-> (CPU mp-formula ($itv $atv) $btv) (: ($prf $prfa) $b $btv))))
+    )
+
+    ((step in)
+      (, (in (
+
+    (exec zealous
+            (, ((step $x) $p0 $t0)
+               (exec zealous $p1 $t1) )
+            (, (exec $x $p0 $t0)
+               (exec zealous $p1 $t1) ))
+    "#;
+
+    const KB_EXPRS: &str = r#"
+    (add (: prf (Implication (Pred $a) (And (Pred2 $b) (Pred3 $a $b))) tv))
+
+    (rule (-> (: $prf (Implication $a $b) $itv) (-> (: $prfa $a $atv) (-> (CPU mp-formula ($itv $atv) $btv) (: ($prf $prfa) $b $btv)))))
+    "#;
+
+    s.load_all_sexpr(SPACE_EXPRS.as_bytes()).unwrap();
+    s.load_all_sexpr(KB_EXPRS.as_bytes()).unwrap();
+
+    let mut t0 = Instant::now();
+    let steps = s.metta_calculus(47);
+    println!("elapsed {} steps {} size {}", t0.elapsed().as_millis(), steps, s.btm.val_count());
+
+    let mut v = vec![];
+    s.dump_sexpr(expr!(s, "[2] ev [3] : $ C"), expr!(s, "_1"), &mut v);
+    let res = String::from_utf8(v).unwrap();
+
+    println!("result: {res}");
+}
+
+
 fn skolemize_sexp(premise_src: &str, conclusion_src: &str, f_name: &str) -> Result<String, String> {
     // Keep parse contexts alive while SExp borrows from them.
     let mut pctx = ParseContext::new(premise_src);
@@ -184,11 +274,13 @@ fn skolemize_test() {
 fn main() {
     env_logger::init();
 
+    bc1();
+
     //skolemize_test();
 
     //sexpr!("(Hello (A B))");
     //
     // Compare with pure-Rust Skolemization using SExp (no Space involved)
-    let pure = skolemize_sexp("(Pred1 &a &c)", "(Pred2 &a &b)", "f").expect("skolemize_sexp");
-    println!("pure-result:\n{pure}");
+    //let pure = skolemize_sexp("(Pred1 &a &c)", "(Pred2 &a &b)", "f").expect("skolemize_sexp");
+    //println!("pure-result:\n{pure}");
 }
