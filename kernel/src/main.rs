@@ -3278,6 +3278,7 @@ enum Commands {
         steps: usize,
         #[arg(long, default_value_t = 1)]
         instrumentation: usize,
+        #[arg(long, short = 'o')]
         output_path: Option<String>,
         #[arg(long)]
         query_pattern: Option<String>,
