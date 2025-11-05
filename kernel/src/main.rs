@@ -3314,8 +3314,8 @@ fn main() {
     // sink_odd_even_sort();
     // cross_join();
     // cross_join_dict();
-    process_calculus_source_sink_bench(100, 20, 20);
-    return;
+    //process_calculus_source_sink_bench(100, 20, 20);
+    //return;
 
     let args = Cli::parse();
 
