@@ -931,6 +931,102 @@ pub extern "C" fn pln_mp_confidence_f64(
     Ok(())
 }
 
+// PeTTaChainer tv_formulas.metta CTVInversionFormula helpers. The negative
+// branch reuses the same ops with complemented sb / sb_a arguments (ideal-var
+// is symmetric in s vs 1-s, so the variances come out identical to PeTTa's).
+fn pln_inv_out_of_range(sb: f64) -> bool {
+    sb <= 0.0 || sb >= 1.0
+}
+
+op!(num ternary pln_inv_strength_f64(sa: f64, sb: f64, sb_a: f64) => {
+    if pln_inv_out_of_range(sb) { 0.0 } else { ((sb_a * sa) / sb).min(1.0) }
+});
+
+fn pln_ideal_ratio_var(p: f64, vp: f64, sa: f64, vsa: f64, q: f64, vq: f64) -> f64 {
+    let d1 = sa / q;
+    let d2 = p / q;
+    let d3 = (p * sa) / (q * q);
+    (d1 * d1) * vp + (d2 * d2) * vsa + (d3 * d3) * vq
+}
+
+fn pln_inv_confidence(sa: f64, ca: f64, sb: f64, cb: f64, sb_a: f64, cb_a: f64) -> f64 {
+    if pln_inv_out_of_range(sb) {
+        return 0.0;
+    }
+    let va = pln_ideal_var(sb_a, cb_a);
+    let vsa = pln_ideal_var(sa, ca);
+    let vsb = pln_ideal_var(sb, cb);
+    let s = ((sb_a * sa) / sb).min(1.0);
+    pln_ideal_conf_from_var(s, pln_ideal_ratio_var(sb_a, va, sa, vsa, sb, vsb))
+}
+
+pub extern "C" fn pln_inv_confidence_f64(
+    expr: *mut ExprSource,
+    sink: *mut ExprSink,
+) -> Result<(), EvalError> {
+    let expr = unsafe { &mut *expr };
+    let sink = unsafe { &mut *sink };
+    let items = expr.consume_head_check(b"pln_inv_confidence_f64")?;
+    if items != 6 {
+        return Err(EvalError::from("pln_inv_confidence_f64 takes six arguments"));
+    }
+    let sa = expr.consume::<f64>()?;
+    let ca = expr.consume::<f64>()?;
+    let sb = expr.consume::<f64>()?;
+    let cb = expr.consume::<f64>()?;
+    let sb_a = expr.consume::<f64>()?;
+    let cb_a = expr.consume::<f64>()?;
+    sink.write(SourceItem::Symbol(
+        pln_inv_confidence(sa, ca, sb, cb, sb_a, cb_a).to_be_bytes()[..].into(),
+    ))?;
+    Ok(())
+}
+
+// 1.0 when the inversion may fire, 0.0 when PeTTa's CTVInversionFormula
+// rejects it: either base rate is no-evidence (exactly (0.0 0.0)), or the
+// implication's positive strength lies outside the Frechet bounds set by the
+// base rates (InversionConsistency).
+fn pln_inversion_valid(sa: f64, ca: f64, sb: f64, cb: f64, sb_a: f64) -> f64 {
+    if (sa == 0.0 && ca == 0.0) || (sb == 0.0 && cb == 0.0) {
+        return 0.0;
+    }
+    if pln_inv_out_of_range(sb) {
+        return 1.0;
+    }
+    if sa > 0.0 {
+        let smallest = ((sa + sb - 1.0) / sa).max(0.0);
+        let largest = (sb / sa).min(1.0);
+        let consistent = sa > 0.0 && sb > 0.0 && smallest <= sb_a && sb_a <= largest;
+        if !consistent {
+            return 0.0;
+        }
+    }
+    1.0
+}
+
+pub extern "C" fn pln_inversion_valid_f64(
+    expr: *mut ExprSource,
+    sink: *mut ExprSink,
+) -> Result<(), EvalError> {
+    let expr = unsafe { &mut *expr };
+    let sink = unsafe { &mut *sink };
+    let items = expr.consume_head_check(b"pln_inversion_valid_f64")?;
+    if items != 5 {
+        return Err(EvalError::from(
+            "pln_inversion_valid_f64 takes five arguments",
+        ));
+    }
+    let sa = expr.consume::<f64>()?;
+    let ca = expr.consume::<f64>()?;
+    let sb = expr.consume::<f64>()?;
+    let cb = expr.consume::<f64>()?;
+    let sb_a = expr.consume::<f64>()?;
+    sink.write(SourceItem::Symbol(
+        pln_inversion_valid(sa, ca, sb, cb, sb_a).to_be_bytes()[..].into(),
+    ))?;
+    Ok(())
+}
+
 pub extern "C" fn pln_and_confidence_f64(
     expr: *mut ExprSource,
     sink: *mut ExprSink,
@@ -1603,6 +1699,17 @@ pub fn register(scope: &mut EvalScope) {
     scope.add_func(
         "pln_mp_confidence_f64",
         pln_mp_confidence_f64,
+        FuncType::Pure,
+    );
+    scope.add_func("pln_inv_strength_f64", pln_inv_strength_f64, FuncType::Pure);
+    scope.add_func(
+        "pln_inv_confidence_f64",
+        pln_inv_confidence_f64,
+        FuncType::Pure,
+    );
+    scope.add_func(
+        "pln_inversion_valid_f64",
+        pln_inversion_valid_f64,
         FuncType::Pure,
     );
 
