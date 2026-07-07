@@ -821,6 +821,103 @@ fn merge_evidenced_stv(
     }
 }
 
+#[derive(Default)]
+struct BaseRateGroup {
+    old: Vec<u8>,
+    fact_stvs: Vec<(f64, f64)>,
+}
+
+/// Maintains `(base-rate $patQ $stv)` facts from `(fold-base-rate $patQ $old $stv)`
+/// rows. `$patQ` is an uninstantiated pattern copy that keys the group, `$old` is
+/// the current value, and each row's `$stv` is one matching fact's truth value.
+/// The weighted base rate follows PeTTaChainer's BaseRateAcc/BaseRateTv:
+/// strength = sum(s*c)/sum(c), confidence = count-confidence(sum(c)).
+pub struct BaseRateSink {
+    groups: BTreeMap<Vec<u8>, BaseRateGroup>,
+}
+
+impl Sink for BaseRateSink {
+    fn new(_e: Expr) -> Self {
+        BaseRateSink {
+            groups: BTreeMap::new(),
+        }
+    }
+    fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
+        std::iter::once(WriteResourceRequest::BTM([].as_slice()))
+    }
+    fn sink<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+        path: &[u8],
+    ) where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        let mpath = &path[wz.root_prefix_path().len()..];
+        let args = expr_args(mpath);
+        assert_eq!(args.len(), 4, "fold-base-rate expects 3 payload args");
+        assert_eq!(symbol_str(args[0]), "fold-base-rate");
+
+        let group = self.groups.entry(args[1].to_vec()).or_default();
+        group.old = args[2].to_vec();
+        group.fact_stvs.push(stv_parts(args[3]));
+    }
+    fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+    ) -> bool
+    where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        wz.reset();
+        let mut remove = PathMap::new();
+        let mut add = PathMap::new();
+
+        for (pattern, group) in &self.groups {
+            let mut wsum = 0.0;
+            let mut csum = 0.0;
+            for (s, c) in &group.fact_stvs {
+                wsum += s * c;
+                csum += c;
+            }
+            let new = if csum <= 0.0 {
+                stv_bytes(0.0, 0.0)
+            } else {
+                stv_bytes(wsum / csum, csum / (csum + 800.0))
+            };
+            if new == group.old {
+                continue;
+            }
+            let mut old_fact = Vec::new();
+            push_expr(&mut old_fact, "base-rate", &[pattern, &group.old[..]]);
+            remove.insert(&old_fact[..], ());
+            let mut new_fact = Vec::new();
+            push_expr(&mut new_fact, "base-rate", &[pattern, &new[..]]);
+            add.insert(&new_fact[..], ());
+        }
+
+        let removed = match wz.subtract_into(&remove.read_zipper(), true) {
+            AlgebraicStatus::Element => true,
+            AlgebraicStatus::Identity => false,
+            AlgebraicStatus::None => true,
+        };
+        wz.reset();
+        let added = match wz.join_into(&add.read_zipper()) {
+            AlgebraicStatus::Element => true,
+            AlgebraicStatus::Identity => false,
+            AlgebraicStatus::None => true,
+        };
+        removed || added
+    }
+}
+
 impl Sink for ReviseProofsSink {
     fn new(_e: Expr) -> Self {
         ReviseProofsSink {
@@ -2304,6 +2401,7 @@ pub enum ASink {
     HeadSink(HeadTailSink<true>),
     TailSink(HeadTailSink<false>),
     ReviseProofsSink(ReviseProofsSink),
+    BaseRateSink(BaseRateSink),
     CountSink(CountSink),
     HashSink(HashSink),
     SumSink(SumSink),
@@ -2383,6 +2481,12 @@ impl Sink for ASink {
                 && *e.ptr.offset(14) == b's'
         } {
             ASink::ReviseProofsSink(ReviseProofsSink::new(e))
+        } else if unsafe {
+            *e.ptr == item_byte(Tag::Arity(4))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(14))
+                && &*slice_from_raw_parts(e.ptr.offset(2), 14) == b"fold-base-rate"
+        } {
+            ASink::BaseRateSink(BaseRateSink::new(e))
         } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(4))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(5))
@@ -2549,6 +2653,11 @@ impl Sink for ASink {
                         yield i
                     }
                 }
+                ASink::BaseRateSink(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
                 ASink::CountSink(s) => {
                     for i in s.request().into_iter() {
                         yield i
@@ -2636,6 +2745,7 @@ impl Sink for ASink {
             ASink::HeadSink(s) => s.sink(it, path),
             ASink::TailSink(s) => s.sink(it, path),
             ASink::ReviseProofsSink(s) => s.sink(it, path),
+            ASink::BaseRateSink(s) => s.sink(it, path),
             ASink::CountSink(s) => s.sink(it, path),
             ASink::HashSink(s) => s.sink(it, path),
             ASink::SumSink(s) => s.sink(it, path),
@@ -2671,6 +2781,7 @@ impl Sink for ASink {
             ASink::HeadSink(s) => s.finalize(it),
             ASink::TailSink(s) => s.finalize(it),
             ASink::ReviseProofsSink(s) => s.finalize(it),
+            ASink::BaseRateSink(s) => s.finalize(it),
             ASink::CountSink(s) => s.finalize(it),
             ASink::HashSink(s) => s.finalize(it),
             ASink::SumSink(s) => s.finalize(it),

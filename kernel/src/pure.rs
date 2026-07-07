@@ -840,15 +840,13 @@ op!(num from_string f64_from_string<f64>);
 op!(num to_string f64_to_string<f64>);
 
 const PLN_EVIDENCE_CONFIDENCE_K: f64 = 800.0;
-const PLN_CERTAINTY_COUNT: f64 = 8_000_000.0;
 
+// PeTTaChainer chainer_utils.metta: (/ (* $conf 800) (- 1 (min-atom ($conf 0.9999))))
 fn pln_confidence_to_count(confidence: f64) -> f64 {
-    if confidence >= 1.0 {
-        PLN_CERTAINTY_COUNT
-    } else if confidence <= 0.0 {
+    if confidence <= 0.0 {
         0.0
     } else {
-        PLN_EVIDENCE_CONFIDENCE_K * confidence / (1.0 - confidence)
+        PLN_EVIDENCE_CONFIDENCE_K * confidence / (1.0 - confidence.min(0.9999))
     }
 }
 
@@ -880,6 +878,57 @@ fn pln_and_confidence(s1: f64, c1: f64, s2: f64, c2: f64) -> f64 {
     let v2 = pln_ideal_var(s2, c2);
     let var = v1 * v2 + v1 * s2 * s2 + s1 * s1 * v2;
     pln_ideal_conf_from_var(strength, var)
+}
+
+// PeTTaChainer tv_formulas.metta NegativeBranchStrength.
+fn pln_negative_branch_strength(sa: f64, sb: f64, sb_a: f64) -> f64 {
+    if sa >= 1.0 {
+        sb
+    } else {
+        ((sb - sa * sb_a) / (1.0 - sa)).clamp(0.0, 1.0)
+    }
+}
+
+op!(num ternary pln_negative_branch_strength_f64(sa: f64, sb: f64, sb_a: f64) => pln_negative_branch_strength(sa, sb, sb_a));
+
+// PeTTaChainer tv_formulas.metta CTVModusPonensFormula strength:
+// sB = bs_a*as + bs_na*(1-as).
+op!(num ternary pln_mp_strength_f64(premise_s: f64, pos_s: f64, neg_s: f64) => pos_s * premise_s + neg_s * (1.0 - premise_s));
+
+// PeTTaChainer tv_formulas.metta ideal-mp-confidence: propagate the exact
+// variance of sB = bs_a*as + bs_na*(1-as) through modus ponens.
+fn pln_mp_confidence(as_: f64, ac: f64, bs_a: f64, bc_a: f64, bs_na: f64, bc_na: f64) -> f64 {
+    let va = pln_ideal_var(bs_a, bc_a);
+    let vna = pln_ideal_var(bs_na, bc_na);
+    let vz = pln_ideal_var(as_, ac);
+    let s_b = bs_a * as_ + bs_na * (1.0 - as_);
+    let vars_b = (as_ * as_) * va
+        + ((1.0 - as_) * (1.0 - as_)) * vna
+        + ((bs_a - bs_na) * (bs_a - bs_na)) * vz
+        + vz * (va + vna);
+    pln_ideal_conf_from_var(s_b, vars_b)
+}
+
+pub extern "C" fn pln_mp_confidence_f64(
+    expr: *mut ExprSource,
+    sink: *mut ExprSink,
+) -> Result<(), EvalError> {
+    let expr = unsafe { &mut *expr };
+    let sink = unsafe { &mut *sink };
+    let items = expr.consume_head_check(b"pln_mp_confidence_f64")?;
+    if items != 6 {
+        return Err(EvalError::from("pln_mp_confidence_f64 takes six arguments"));
+    }
+    let as_ = expr.consume::<f64>()?;
+    let ac = expr.consume::<f64>()?;
+    let bs_a = expr.consume::<f64>()?;
+    let bc_a = expr.consume::<f64>()?;
+    let bs_na = expr.consume::<f64>()?;
+    let bc_na = expr.consume::<f64>()?;
+    sink.write(SourceItem::Symbol(
+        pln_mp_confidence(as_, ac, bs_a, bc_a, bs_na, bc_na).to_be_bytes()[..].into(),
+    ))?;
+    Ok(())
 }
 
 pub extern "C" fn pln_and_confidence_f64(
@@ -1543,6 +1592,17 @@ pub fn register(scope: &mut EvalScope) {
     scope.add_func(
         "pln_and_confidence_f64",
         pln_and_confidence_f64,
+        FuncType::Pure,
+    );
+    scope.add_func(
+        "pln_negative_branch_strength_f64",
+        pln_negative_branch_strength_f64,
+        FuncType::Pure,
+    );
+    scope.add_func("pln_mp_strength_f64", pln_mp_strength_f64, FuncType::Pure);
+    scope.add_func(
+        "pln_mp_confidence_f64",
+        pln_mp_confidence_f64,
         FuncType::Pure,
     );
 
