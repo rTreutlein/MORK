@@ -710,6 +710,71 @@ op!(num nary min_f64(f64::INFINITY, t: f64, x: f64) => t.min(x));
 op!(num from_string f64_from_string<f64>);
 op!(num to_string f64_to_string<f64>);
 
+const PLN_EVIDENCE_CONFIDENCE_K: f64 = 800.0;
+const PLN_CERTAINTY_COUNT: f64 = 8_000_000.0;
+
+fn pln_confidence_to_count(confidence: f64) -> f64 {
+    if confidence >= 1.0 {
+        PLN_CERTAINTY_COUNT
+    } else if confidence <= 0.0 {
+        0.0
+    } else {
+        PLN_EVIDENCE_CONFIDENCE_K * confidence / (1.0 - confidence)
+    }
+}
+
+fn pln_ideal_clip(strength: f64) -> f64 {
+    strength.clamp(0.000001, 0.999999)
+}
+
+fn pln_ideal_var(strength: f64, confidence: f64) -> f64 {
+    let clipped_strength = pln_ideal_clip(strength);
+    clipped_strength * (1.0 - clipped_strength) / (pln_confidence_to_count(confidence) + 1.0)
+}
+
+fn pln_ideal_conf_from_var(strength: f64, var: f64) -> f64 {
+    if var <= 0.0 {
+        return 0.9999;
+    }
+    let clipped_strength = pln_ideal_clip(strength);
+    let maxvar = clipped_strength * (1.0 - clipped_strength);
+    let n = maxvar / var.min(maxvar) - 1.0;
+    (n / (n + PLN_EVIDENCE_CONFIDENCE_K)).max(0.000001)
+}
+
+fn pln_and_confidence(s1: f64, c1: f64, s2: f64, c2: f64) -> f64 {
+    if c1 <= 0.0 || c2 <= 0.0 {
+        return 0.0;
+    }
+    let strength = s1 * s2;
+    let v1 = pln_ideal_var(s1, c1);
+    let v2 = pln_ideal_var(s2, c2);
+    let var = v1 * v2 + v1 * s2 * s2 + s1 * s1 * v2;
+    pln_ideal_conf_from_var(strength, var)
+}
+
+pub extern "C" fn pln_and_confidence_f64(
+    expr: *mut ExprSource,
+    sink: *mut ExprSink,
+) -> Result<(), EvalError> {
+    let expr = unsafe { &mut *expr };
+    let sink = unsafe { &mut *sink };
+    let items = expr.consume_head_check(b"pln_and_confidence_f64")?;
+    if items != 4 {
+        return Err(EvalError::from(
+            "pln_and_confidence_f64 takes four arguments",
+        ));
+    }
+    let s1 = expr.consume::<f64>()?;
+    let c1 = expr.consume::<f64>()?;
+    let s2 = expr.consume::<f64>()?;
+    let c2 = expr.consume::<f64>()?;
+    sink.write(SourceItem::Symbol(
+        pln_and_confidence(s1, c1, s2, c2).to_be_bytes()[..].into(),
+    ))?;
+    Ok(())
+}
+
 op!(num unary f32_as_i8(x: f32) => x as i8);
 op!(num unary f32_as_i16(x: f32) => x as i16);
 op!(num unary f32_as_i32(x: f32) => x as i32);
@@ -1289,6 +1354,11 @@ pub fn register(scope: &mut EvalScope) {
     scope.add_func("min_f64", min_f64, FuncType::Pure);
     scope.add_func("f64_from_string", f64_from_string, FuncType::Pure);
     scope.add_func("f64_to_string", f64_to_string, FuncType::Pure);
+    scope.add_func(
+        "pln_and_confidence_f64",
+        pln_and_confidence_f64,
+        FuncType::Pure,
+    );
 
     scope.add_func("f32_as_i8", f32_as_i8, FuncType::Pure);
     scope.add_func("f32_as_i16", f32_as_i16, FuncType::Pure);
