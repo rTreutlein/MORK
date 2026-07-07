@@ -1049,6 +1049,26 @@ pub extern "C" fn pln_and_confidence_f64(
     Ok(())
 }
 
+// PeTTaChainer tv_formulas.metta AndProjection / OrProjection /
+// AndMarginalProjection: extract one element of a compound (And ...) /
+// (Or ...) truth value given the evidence TV of the other elements (sa/ca).
+op!(num binary pln_and_proj_strength_f64(sab: f64, sa: f64) => {
+    if sa == 0.0 { 0.0 } else { (sab / sa).min(1.0) }
+});
+op!(num ternary pln_and_proj_confidence_f64(cab: f64, ca: f64, sa: f64) => {
+    if sa == 0.0 { 0.0 } else { cab.min(ca) }
+});
+op!(num binary pln_or_proj_strength_f64(sab: f64, sa: f64) => {
+    if sa == 1.0 { 0.0 } else { ((sab - sa) / (1.0 - sa)).clamp(0.0, 1.0) }
+});
+op!(num ternary pln_or_proj_confidence_f64(cab: f64, ca: f64, sa: f64) => {
+    if sa == 1.0 { 0.0 } else { cab.min(ca) }
+});
+op!(num binary pln_marginal_proj_confidence_f64(sab: f64, cab: f64) => {
+    let count = sab * pln_confidence_to_count(cab);
+    count / (count + PLN_EVIDENCE_CONFIDENCE_K)
+});
+
 op!(num unary f32_as_i8(x: f32) => x as i8);
 op!(num unary f32_as_i16(x: f32) => x as i16);
 op!(num unary f32_as_i32(x: f32) => x as i32);
@@ -1710,6 +1730,31 @@ pub fn register(scope: &mut EvalScope) {
     scope.add_func(
         "pln_inversion_valid_f64",
         pln_inversion_valid_f64,
+        FuncType::Pure,
+    );
+    scope.add_func(
+        "pln_and_proj_strength_f64",
+        pln_and_proj_strength_f64,
+        FuncType::Pure,
+    );
+    scope.add_func(
+        "pln_and_proj_confidence_f64",
+        pln_and_proj_confidence_f64,
+        FuncType::Pure,
+    );
+    scope.add_func(
+        "pln_or_proj_strength_f64",
+        pln_or_proj_strength_f64,
+        FuncType::Pure,
+    );
+    scope.add_func(
+        "pln_or_proj_confidence_f64",
+        pln_or_proj_confidence_f64,
+        FuncType::Pure,
+    );
+    scope.add_func(
+        "pln_marginal_proj_confidence_f64",
+        pln_marginal_proj_confidence_f64,
         FuncType::Pure,
     );
 
