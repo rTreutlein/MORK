@@ -2839,6 +2839,33 @@ fn sink_float_reduce_guarded() {
     assert_eq!(res, "2\n")
 }
 
+fn sink_dist_average() {
+    let mut s = Space::new();
+
+    const SPACE_EXPRS: &str = r#"
+(exec 0
+    (, (avg-source $src $x $w))
+    (O (dist-average out $src $x $w)))
+
+(avg-source a 150.0 0.5)
+(avg-source a 170.0 0.5)
+(avg-source b 160.0 1.0)
+    "#;
+
+    s.add_all_sexpr(SPACE_EXPRS.as_bytes()).unwrap();
+    s.metta_calculus(100);
+
+    let mut v = vec![];
+    s.dump_sexpr(
+        expr!(s, "[4] dist-pair out $ $"),
+        expr!(s, "[2] _1 _2"),
+        &mut v,
+    );
+    let res = String::from_utf8_lossy_owned(v);
+
+    assert_eq!(res, "(155 0.5)\n(165 0.5)\n")
+}
+
 fn sink_count() {
     let mut s = Space::new();
 
@@ -6252,6 +6279,7 @@ fn main() {
             sink_even_half();
             sink_float_reduce();
             sink_float_reduce_guarded();
+            sink_dist_average();
 
             parse_csv();
             parse_json();

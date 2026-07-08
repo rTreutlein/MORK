@@ -1139,6 +1139,108 @@ impl Sink for PairCountsSink {
     }
 }
 
+pub struct DistAverageSink {
+    groups: BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, Vec<(f64, f64)>>>,
+}
+
+impl Sink for DistAverageSink {
+    fn new(_e: Expr) -> Self {
+        DistAverageSink {
+            groups: BTreeMap::new(),
+        }
+    }
+    fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
+        std::iter::once(WriteResourceRequest::BTM([].as_slice()))
+    }
+    fn sink<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+        path: &[u8],
+    ) where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        let mpath = &path[wz.root_prefix_path().len()..];
+        let args = expr_args(mpath);
+        assert_eq!(args.len(), 5, "dist-average expects 4 payload args");
+        assert_eq!(symbol_str(args[0]), "dist-average");
+
+        let result_pid = args[1].to_vec();
+        let source = args[2].to_vec();
+        let x = str::parse::<f64>(symbol_str(args[3])).unwrap();
+        let w = str::parse::<f64>(symbol_str(args[4])).unwrap();
+        self.groups
+            .entry(result_pid)
+            .or_default()
+            .entry(source)
+            .or_default()
+            .push((x, w));
+    }
+    fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+    ) -> bool
+    where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        wz.reset();
+
+        let mut add = PathMap::new();
+        for (result_pid, sources) in &self.groups {
+            if sources.is_empty() {
+                continue;
+            }
+
+            let mut sums = vec![(0.0, 1.0)];
+            for pairs in sources.values() {
+                let mut next = Vec::with_capacity(sums.len() * pairs.len());
+                for (sum, mass) in &sums {
+                    for (x, w) in pairs {
+                        next.push((sum + x, mass * w));
+                    }
+                }
+                sums = next;
+            }
+
+            let count = sources.len() as f64;
+            let mut averaged: BTreeMap<String, f64> = BTreeMap::new();
+            for (sum, mass) in sums {
+                let avg = (sum / count).to_string();
+                *averaged.entry(avg).or_default() += mass;
+            }
+
+            for (avg, mass) in averaged {
+                if mass == 0.0 {
+                    continue;
+                }
+                let avg_bytes = symbol_bytes(&avg);
+                let mass_bytes = symbol_bytes(&mass.to_string());
+                let mut atom = Vec::new();
+                push_expr(
+                    &mut atom,
+                    "dist-pair",
+                    &[result_pid, &avg_bytes[..], &mass_bytes[..]],
+                );
+                add.insert(&atom[..], ());
+            }
+        }
+        self.groups.clear();
+
+        match wz.join_into(&add.read_zipper()) {
+            AlgebraicStatus::Element => true,
+            AlgebraicStatus::Identity => false,
+            AlgebraicStatus::None => true,
+        }
+    }
+}
+
 pub struct OrStvSink {
     unique: PathMap<()>,
 }
@@ -2972,6 +3074,7 @@ pub enum ASink {
     ReviseProofsSink(ReviseProofsSink),
     BaseRateSink(BaseRateSink),
     PairCountsSink(PairCountsSink),
+    DistAverageSink(DistAverageSink),
     OrStvSink(OrStvSink),
     TotalEvidenceMpSink(TotalEvidenceMpSink),
     CountSink(CountSink),
@@ -3065,6 +3168,12 @@ impl Sink for ASink {
                 && &*slice_from_raw_parts(e.ptr.offset(2), 11) == b"pair-counts"
         } {
             ASink::PairCountsSink(PairCountsSink::new(e))
+        } else if unsafe {
+            *e.ptr == item_byte(Tag::Arity(5))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(12))
+                && &*slice_from_raw_parts(e.ptr.offset(2), 12) == b"dist-average"
+        } {
+            ASink::DistAverageSink(DistAverageSink::new(e))
         } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(8))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(6))
@@ -3253,6 +3362,11 @@ impl Sink for ASink {
                         yield i
                     }
                 }
+                ASink::DistAverageSink(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
                 ASink::OrStvSink(s) => {
                     for i in s.request().into_iter() {
                         yield i
@@ -3352,6 +3466,7 @@ impl Sink for ASink {
             ASink::ReviseProofsSink(s) => s.sink(it, path),
             ASink::BaseRateSink(s) => s.sink(it, path),
             ASink::PairCountsSink(s) => s.sink(it, path),
+            ASink::DistAverageSink(s) => s.sink(it, path),
             ASink::OrStvSink(s) => s.sink(it, path),
             ASink::TotalEvidenceMpSink(s) => s.sink(it, path),
             ASink::CountSink(s) => s.sink(it, path),
@@ -3391,6 +3506,7 @@ impl Sink for ASink {
             ASink::ReviseProofsSink(s) => s.finalize(it),
             ASink::BaseRateSink(s) => s.finalize(it),
             ASink::PairCountsSink(s) => s.finalize(it),
+            ASink::DistAverageSink(s) => s.finalize(it),
             ASink::OrStvSink(s) => s.finalize(it),
             ASink::TotalEvidenceMpSink(s) => s.finalize(it),
             ASink::CountSink(s) => s.finalize(it),
