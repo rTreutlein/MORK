@@ -1139,6 +1139,179 @@ impl Sink for PairCountsSink {
     }
 }
 
+pub struct OrStvSink {
+    unique: PathMap<()>,
+}
+
+type OrStvKey = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+type OrStvRow = (Vec<u8>, Vec<u8>, Vec<u8>);
+
+impl OrStvSink {
+    fn ideal_clip(strength: f64) -> f64 {
+        strength.clamp(0.000001, 0.999999)
+    }
+
+    fn ideal_var(strength: f64, confidence: f64) -> f64 {
+        let clipped = Self::ideal_clip(strength);
+        clipped * (1.0 - clipped) / (confidence_to_count(confidence) + 1.0)
+    }
+
+    fn ideal_conf_from_var(strength: f64, var: f64) -> f64 {
+        if var <= 0.0 {
+            return 0.9999;
+        }
+        let clipped = Self::ideal_clip(strength);
+        let maxvar = clipped * (1.0 - clipped);
+        let n = maxvar / var.min(maxvar) - 1.0;
+        (n / (n + 800.0)).max(0.000001)
+    }
+
+    fn ideal_prod_confidence(s1: f64, v1: f64, s2: f64, v2: f64, strength: f64) -> f64 {
+        let var = v1 * v2 + v1 * s2 * s2 + s1 * s1 * v2;
+        Self::ideal_conf_from_var(strength, var)
+    }
+
+    fn or_stv(left: &[u8], right: &[u8]) -> Vec<u8> {
+        let (left_s, left_c) = stv_parts(left);
+        let (right_s, right_c) = stv_parts(right);
+        let strength = left_s + right_s - (left_s * right_s);
+        let confidence = if left_c <= 0.0 || right_c <= 0.0 {
+            0.0
+        } else {
+            Self::ideal_prod_confidence(
+                1.0 - left_s,
+                Self::ideal_var(left_s, left_c),
+                1.0 - right_s,
+                Self::ideal_var(right_s, right_c),
+                strength,
+            )
+        };
+        stv_bytes(strength, confidence)
+    }
+
+    fn mp_stv(premise: &[u8], pos: &[u8], neg: &[u8]) -> Vec<u8> {
+        let (premise_s, premise_c) = stv_parts(premise);
+        let (pos_s, pos_c) = stv_parts(pos);
+        let (neg_s, neg_c) = stv_parts(neg);
+        let strength = pos_s * premise_s + neg_s * (1.0 - premise_s);
+        let confidence = {
+            let v_pos = Self::ideal_var(pos_s, pos_c);
+            let v_neg = Self::ideal_var(neg_s, neg_c);
+            let v_premise = Self::ideal_var(premise_s, premise_c);
+            let var = (premise_s * premise_s * v_pos)
+                + ((1.0 - premise_s) * (1.0 - premise_s) * v_neg)
+                + ((pos_s - neg_s) * (pos_s - neg_s) * v_premise)
+                + (v_premise * (v_pos + v_neg));
+            Self::ideal_conf_from_var(strength, var)
+        };
+        stv_bytes(strength, confidence)
+    }
+
+    fn proof_id(rule_id: &[u8], proof_ids: &[Vec<u8>]) -> Vec<u8> {
+        let proof_refs: Vec<&[u8]> = proof_ids.iter().map(Vec::as_slice).collect();
+        let mut disjunction = Vec::new();
+        push_expr(&mut disjunction, "disjunction", &proof_refs);
+
+        let mut proof = Vec::new();
+        push_raw_expr(&mut proof, &[rule_id, &disjunction[..]]);
+        proof
+    }
+}
+
+impl Sink for OrStvSink {
+    fn new(_e: Expr) -> Self {
+        OrStvSink {
+            unique: PathMap::new(),
+        }
+    }
+    fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
+        std::iter::once(WriteResourceRequest::BTM([].as_slice()))
+    }
+    fn sink<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+        path: &[u8],
+    ) where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        let mpath = &path[wz.root_prefix_path().len()..];
+        let args = expr_args(mpath);
+        assert_eq!(args.len(), 8, "or-stv expects 7 payload args");
+        assert_eq!(symbol_str(args[0]), "or-stv");
+        self.unique.insert(mpath, ());
+    }
+    fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+    ) -> bool
+    where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        wz.reset();
+
+        let mut groups: BTreeMap<OrStvKey, Vec<OrStvRow>> = BTreeMap::new();
+        for (path, ()) in self.unique.iter() {
+            let args = expr_args(&path);
+            let key = (
+                args[1].to_vec(),
+                args[2].to_vec(),
+                args[3].to_vec(),
+                args[4].to_vec(),
+            );
+            groups.entry(key).or_default().push((
+                args[5].to_vec(),
+                args[6].to_vec(),
+                args[7].to_vec(),
+            ));
+        }
+        self.unique = PathMap::new();
+
+        let mut add = PathMap::new();
+        for ((goal, rule_id, pos, neg), mut rows) in groups {
+            rows.sort_by(|(left_stv, left_proof, _), (right_stv, right_proof, _)| {
+                let (left_s, _) = stv_parts(left_stv);
+                let (right_s, _) = stv_parts(right_stv);
+                right_s
+                    .partial_cmp(&left_s)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| serialize(left_proof).cmp(&serialize(right_proof)))
+            });
+            let mut acc = stv_bytes(0.0, 1.0);
+            let mut proof_ids = Vec::new();
+            let mut evidence = symbol_bytes("pnil");
+            for (stv, proof_id, evset) in rows {
+                acc = OrStvSink::or_stv(&acc, &stv);
+                proof_ids.push(proof_id);
+                evidence = evidence_union(&evidence, &evset);
+            }
+            let proof_stv = OrStvSink::mp_stv(&acc, &pos, &neg);
+            let proof_id = OrStvSink::proof_id(&rule_id, &proof_ids);
+
+            let mut open_proof = Vec::new();
+            push_expr(
+                &mut open_proof,
+                "open-proof",
+                &[&goal[..], &proof_stv[..], &proof_id[..], &evidence[..]],
+            );
+            add.insert(&open_proof[..], ());
+        }
+
+        match wz.join_into(&add.read_zipper()) {
+            AlgebraicStatus::Element => true,
+            AlgebraicStatus::Identity => false,
+            AlgebraicStatus::None => true,
+        }
+    }
+}
+
 impl Sink for ReviseProofsSink {
     fn new(_e: Expr) -> Self {
         ReviseProofsSink {
@@ -2630,6 +2803,7 @@ pub enum ASink {
     ReviseProofsSink(ReviseProofsSink),
     BaseRateSink(BaseRateSink),
     PairCountsSink(PairCountsSink),
+    OrStvSink(OrStvSink),
     CountSink(CountSink),
     HashSink(HashSink),
     SumSink(SumSink),
@@ -2721,6 +2895,12 @@ impl Sink for ASink {
                 && &*slice_from_raw_parts(e.ptr.offset(2), 11) == b"pair-counts"
         } {
             ASink::PairCountsSink(PairCountsSink::new(e))
+        } else if unsafe {
+            *e.ptr == item_byte(Tag::Arity(8))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(6))
+                && &*slice_from_raw_parts(e.ptr.offset(2), 6) == b"or-stv"
+        } {
+            ASink::OrStvSink(OrStvSink::new(e))
         } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(4))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(5))
@@ -2897,6 +3077,11 @@ impl Sink for ASink {
                         yield i
                     }
                 }
+                ASink::OrStvSink(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
                 ASink::CountSink(s) => {
                     for i in s.request().into_iter() {
                         yield i
@@ -2986,6 +3171,7 @@ impl Sink for ASink {
             ASink::ReviseProofsSink(s) => s.sink(it, path),
             ASink::BaseRateSink(s) => s.sink(it, path),
             ASink::PairCountsSink(s) => s.sink(it, path),
+            ASink::OrStvSink(s) => s.sink(it, path),
             ASink::CountSink(s) => s.sink(it, path),
             ASink::HashSink(s) => s.sink(it, path),
             ASink::SumSink(s) => s.sink(it, path),
@@ -3023,6 +3209,7 @@ impl Sink for ASink {
             ASink::ReviseProofsSink(s) => s.finalize(it),
             ASink::BaseRateSink(s) => s.finalize(it),
             ASink::PairCountsSink(s) => s.finalize(it),
+            ASink::OrStvSink(s) => s.finalize(it),
             ASink::CountSink(s) => s.finalize(it),
             ASink::HashSink(s) => s.finalize(it),
             ASink::SumSink(s) => s.finalize(it),
