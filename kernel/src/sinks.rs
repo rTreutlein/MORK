@@ -1079,6 +1079,14 @@ fn expanded_fact_evidence_keys(
     expanded_fact_evidence_keys_with_stack(evset, proved, &mut BTreeSet::new())
 }
 
+fn evidence_depends_on_fact(
+    evset: &[u8],
+    fact: &[u8],
+    proved: &BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
+) -> bool {
+    expanded_fact_evidence_keys(evset, proved).contains(fact)
+}
+
 fn residual_evidence(evset: &[u8], shared: &BTreeSet<Vec<u8>>) -> BTreeSet<Vec<u8>> {
     evidence_set(evset)
         .into_iter()
@@ -2292,7 +2300,16 @@ impl Sink for ReviseProofsSink {
                 add.insert(&proved[..], ());
 
                 if factored.is_none() {
+                    let depends_on_goal = if group.old_facts.is_empty() {
+                        false
+                    } else {
+                        let proved = proved_rows.get_or_insert_with(|| collect_proved_rows(wz));
+                        evidence_depends_on_fact(evset, goal, proved)
+                    };
                     merged = Some(match merged {
+                        Some((ref old_stv, ref old_ev)) if depends_on_goal => {
+                            (old_stv.clone(), old_ev.clone())
+                        }
                         Some((ref old_stv, ref old_ev))
                             if is_inversion_snapshot_proof(proof_id)
                                 && evidence_equal(old_ev, evset) =>
