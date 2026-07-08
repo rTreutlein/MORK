@@ -790,6 +790,65 @@ fn evidence_set(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
     out
 }
 
+fn is_variable_expr(bytes: &[u8]) -> bool {
+    match byte_item(bytes[0]) {
+        Tag::NewVar | Tag::VarRef(_) => true,
+        Tag::SymbolSize(size) => size > 0 && bytes[1] == b'$',
+        _ => false,
+    }
+}
+
+fn alpha_equiv_inner(
+    left: &[u8],
+    right: &[u8],
+    left_to_right: &mut BTreeMap<Vec<u8>, Vec<u8>>,
+    right_to_left: &mut BTreeMap<Vec<u8>, Vec<u8>>,
+) -> bool {
+    match (byte_item(left[0]), byte_item(right[0])) {
+        (Tag::Arity(left_arity), Tag::Arity(right_arity)) if left_arity == right_arity => {
+            let left_args = expr_args(left);
+            let right_args = expr_args(right);
+            left_args
+                .iter()
+                .zip(right_args.iter())
+                .all(|(l, r)| alpha_equiv_inner(l, r, left_to_right, right_to_left))
+        }
+        (_, _) if is_variable_expr(left) && is_variable_expr(right) => {
+            match (left_to_right.get(left), right_to_left.get(right)) {
+                (Some(mapped), Some(reverse)) => mapped == right && reverse == left,
+                (Some(mapped), None) => mapped == right,
+                (None, Some(reverse)) => reverse == left,
+                (None, None) => {
+                    left_to_right.insert(left.to_vec(), right.to_vec());
+                    right_to_left.insert(right.to_vec(), left.to_vec());
+                    true
+                }
+            }
+        }
+        (Tag::SymbolSize(_), Tag::SymbolSize(_))
+            if !is_variable_expr(left) && !is_variable_expr(right) =>
+        {
+            left == right
+        }
+        _ => false,
+    }
+}
+
+fn alpha_equiv(left: &[u8], right: &[u8]) -> bool {
+    alpha_equiv_inner(left, right, &mut BTreeMap::new(), &mut BTreeMap::new())
+}
+
+fn evidence_contains_rule(evidence: &[u8], rule: &[u8]) -> bool {
+    evidence_set(evidence).iter().any(|item| {
+        if let Tag::Arity(_) = byte_item(item[0]) {
+            let args = expr_args(item);
+            args.len() == 2 && is_symbol(args[0], "rule-ev") && alpha_equiv(args[1], rule)
+        } else {
+            false
+        }
+    })
+}
+
 fn evidence_list(set: &BTreeSet<Vec<u8>>) -> Vec<u8> {
     let mut out = symbol_bytes("pnil");
     for item in set.iter().rev() {
@@ -911,16 +970,20 @@ struct BaseRateGroup {
 /// Maintains `(base-rate $patQ $stv)` facts from `(fold-base-rate $patQ $old $stv)`
 /// rows. `$patQ` is an uninstantiated pattern copy that keys the group, `$old` is
 /// the current value, and each row's `$stv` is one matching fact's truth value.
+/// Guarded rows use `(fold-base-rate $patQ $old $stv (without-rule $rule $evset))`
+/// and are skipped when `$evset` contains a matching `(rule-ev $rule)` item.
 /// The weighted base rate follows PeTTaChainer's BaseRateAcc/BaseRateTv:
 /// strength = sum(s*c)/sum(c), confidence = count-confidence(sum(c)).
 pub struct BaseRateSink {
     groups: BTreeMap<Vec<u8>, BaseRateGroup>,
+    skipped_rows: bool,
 }
 
 impl Sink for BaseRateSink {
     fn new(_e: Expr) -> Self {
         BaseRateSink {
             groups: BTreeMap::new(),
+            skipped_rows: false,
         }
     }
     fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
@@ -939,8 +1002,20 @@ impl Sink for BaseRateSink {
         };
         let mpath = &path[wz.root_prefix_path().len()..];
         let args = expr_args(mpath);
-        assert_eq!(args.len(), 4, "fold-base-rate expects 3 payload args");
+        assert!(
+            args.len() == 4 || args.len() == 5,
+            "fold-base-rate expects 3 or 4 payload args"
+        );
         assert_eq!(symbol_str(args[0]), "fold-base-rate");
+        if args.len() == 5 {
+            let guard = expr_args(args[4]);
+            assert_eq!(guard.len(), 3, "without-rule expects rule and evidence");
+            assert_eq!(symbol_str(guard[0]), "without-rule");
+            if evidence_contains_rule(guard[2], guard[1]) {
+                self.skipped_rows = true;
+                return;
+            }
+        }
 
         let group = self.groups.entry(args[1].to_vec()).or_default();
         group.old = args[2].to_vec();
@@ -1000,7 +1075,7 @@ impl Sink for BaseRateSink {
             AlgebraicStatus::Identity => false,
             AlgebraicStatus::None => true,
         };
-        removed || added
+        self.skipped_rows || removed || added
     }
 }
 
@@ -3157,7 +3232,7 @@ impl Sink for ASink {
         } {
             ASink::ReviseProofsSink(ReviseProofsSink::new(e))
         } else if unsafe {
-            *e.ptr == item_byte(Tag::Arity(4))
+            (*e.ptr == item_byte(Tag::Arity(4)) || *e.ptr == item_byte(Tag::Arity(5)))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(14))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 14) == b"fold-base-rate"
         } {
