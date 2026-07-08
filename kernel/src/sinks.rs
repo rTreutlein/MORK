@@ -2463,6 +2463,8 @@ impl FloatReduction for Prod {
 pub struct FloatReductionSink<Reduction> {
     e: Expr,
     unique: PathMap<()>,
+    guarded_unique: BTreeSet<Vec<u8>>,
+    guarded: bool,
     boo: PhantomData<Reduction>,
 }
 impl<Reduction: FloatReduction> Sink for FloatReductionSink<Reduction> {
@@ -2470,10 +2472,15 @@ impl<Reduction: FloatReduction> Sink for FloatReductionSink<Reduction> {
         Self {
             e,
             unique: PathMap::new(),
+            guarded_unique: BTreeSet::new(),
+            guarded: unsafe { *e.ptr == item_byte(Tag::Arity(5)) },
             boo: PhantomData,
         }
     }
     fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
+        if self.guarded {
+            return std::iter::once(WriteResourceRequest::BTM([].as_slice()));
+        }
         let p = &unsafe {
             self.e
                 .prefix()
@@ -2498,6 +2505,19 @@ impl<Reduction: FloatReduction> Sink for FloatReductionSink<Reduction> {
         let WriteResource::BTM(wz) = it.next().unwrap() else {
             unreachable!()
         };
+        if self.guarded {
+            let mpath = &path[wz.root_prefix_path().len()..];
+            let args = expr_args(mpath);
+            assert_eq!(
+                args.len(),
+                5,
+                "{} guarded form expects 4 payload args",
+                Reduction::NAME
+            );
+            assert_eq!(symbol_str(args[0]), Reduction::NAME);
+            self.guarded_unique.insert(mpath.to_vec());
+            return;
+        }
         let mpath = &path[2 + Reduction::NAME.len() + wz.root_prefix_path().len()..];
         let ctx = unsafe {
             Expr {
@@ -2520,51 +2540,49 @@ impl<Reduction: FloatReduction> Sink for FloatReductionSink<Reduction> {
             unreachable!()
         };
         wz.reset();
-        if self.ordered {
-            struct OrderedFloatGroup {
+        if self.guarded {
+            struct GuardedFloatGroup {
                 output: Vec<u8>,
                 output_var: Vec<u8>,
-                rows: Vec<(Vec<u8>, f64)>,
+                total: f64,
             }
 
-            let mut groups: BTreeMap<Vec<u8>, OrderedFloatGroup> = BTreeMap::new();
-            for row in &self.ordered_unique {
-                let args = owned_expr_args(row);
+            let mut groups: BTreeMap<Vec<u8>, GuardedFloatGroup> = BTreeMap::new();
+            for row in &self.guarded_unique {
+                let args = expr_args(row);
                 let output = args[1].to_vec();
                 let output_var = args[2].to_vec();
-                let value = str::parse::<f64>(owned_symbol_str(args[3])).unwrap();
-                let order = args[4].to_vec();
+                let value = str::parse::<f64>(symbol_str(args[3])).unwrap();
                 let mut key = output.clone();
                 key.extend_from_slice(&output_var);
-                groups
-                    .entry(key)
-                    .or_insert_with(|| OrderedFloatGroup {
-                        output,
-                        output_var,
-                        rows: Vec::new(),
-                    })
-                    .rows
-                    .push((order, value));
+                let group = groups.entry(key).or_insert_with(|| GuardedFloatGroup {
+                    output,
+                    output_var,
+                    total: Reduction::ACC,
+                });
+                Reduction::op(&mut group.total, value);
             }
-            self.ordered_unique.clear();
+            self.guarded_unique.clear();
 
             let mut changed = false;
-            let mut buffer = Vec::with_capacity(1 << 20);
-            for (_, mut group) in groups {
-                group.rows.sort_by(|left, right| left.0.cmp(&right.0));
-                let mut total = Reduction::ACC;
-                for (_, value) in group.rows {
-                    Reduction::op(&mut total, value);
-                }
-                let mut total_bytes = owned_symbol_bytes(total.to_string().as_bytes());
+            let mut buffer: Vec<u8> = Vec::with_capacity(1 << 20);
+            for (_key, group) in groups {
+                let total_str = group.total.to_string();
+                let mut total_bytes = symbol_bytes(&total_str);
+
                 match byte_item(group.output_var[0]) {
                     Tag::VarRef(k) => {
-                        let output = Expr { ptr: group.output.as_ptr().cast_mut() };
-                        buffer.push(item_byte(Tag::NewVar));
-                        let mut oz = ExprZipper::new(Expr { ptr: buffer.as_mut_ptr() });
-                        output.substitute_one_de_bruijn(
+                        let ie = Expr {
+                            ptr: group.output.as_ptr().cast_mut(),
+                        };
+                        let mut oz = ExprZipper::new(Expr {
+                            ptr: buffer.as_mut_ptr(),
+                        });
+                        ie.substitute_one_de_bruijn(
                             k,
-                            Expr { ptr: total_bytes.as_mut_ptr() },
+                            Expr {
+                                ptr: total_bytes.as_mut_ptr(),
+                            },
                             &mut oz,
                         );
                         unsafe { buffer.set_len(oz.loc) }
@@ -2576,11 +2594,12 @@ impl<Reduction: FloatReduction> Sink for FloatReductionSink<Reduction> {
                         wz.move_to_path(&group.output);
                         changed |= wz.set_val(()).is_none();
                     }
-                    _ if group.output_var == total_bytes => {
-                        wz.move_to_path(&group.output);
-                        changed |= wz.set_val(()).is_none();
+                    _ => {
+                        if group.output_var == &total_bytes[..] {
+                            wz.move_to_path(&group.output);
+                            changed |= wz.set_val(()).is_none();
+                        }
                     }
-                    _ => {}
                 }
             }
             return changed;
@@ -3086,7 +3105,7 @@ impl Sink for ASink {
         } {
             return ASink::SumSink(SumSink::new(e));
         } else if unsafe {
-            *e.ptr == item_byte(Tag::Arity(4))
+            (*e.ptr == item_byte(Tag::Arity(4)) || *e.ptr == item_byte(Tag::Arity(5)))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(4))
                 && *e.ptr.offset(2) == b'f'
                 && *e.ptr.offset(3) == b's'
@@ -3095,7 +3114,7 @@ impl Sink for ASink {
         } {
             return ASink::FSumSink(FloatReductionSink::new(e));
         } else if unsafe {
-            *e.ptr == item_byte(Tag::Arity(4))
+            (*e.ptr == item_byte(Tag::Arity(4)) || *e.ptr == item_byte(Tag::Arity(5)))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(4))
                 && *e.ptr.offset(2) == b'f'
                 && *e.ptr.offset(3) == b'm'
@@ -3104,7 +3123,7 @@ impl Sink for ASink {
         } {
             return ASink::FMinSink(FloatReductionSink::new(e));
         } else if unsafe {
-            *e.ptr == item_byte(Tag::Arity(4))
+            (*e.ptr == item_byte(Tag::Arity(4)) || *e.ptr == item_byte(Tag::Arity(5)))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(4))
                 && *e.ptr.offset(2) == b'f'
                 && *e.ptr.offset(3) == b'm'
@@ -3113,7 +3132,7 @@ impl Sink for ASink {
         } {
             return ASink::FMaxSink(FloatReductionSink::new(e));
         } else if unsafe {
-            *e.ptr == item_byte(Tag::Arity(4))
+            (*e.ptr == item_byte(Tag::Arity(4)) || *e.ptr == item_byte(Tag::Arity(5)))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(5))
                 && *e.ptr.offset(2) == b'f'
                 && *e.ptr.offset(3) == b'p'

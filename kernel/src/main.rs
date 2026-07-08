@@ -2817,6 +2817,28 @@ fn sink_float_reduce() {
 (prod 103014739461697900000000000000000)\n")
 }
 
+fn sink_float_reduce_guarded() {
+    let mut s = Space::new();
+
+    const SPACE_EXPRS: &str = r#"
+(exec 0
+    (, (n $x $id))
+    (O (fsum (sum $c) $c $x $id)))
+
+(n 1.0 left)
+(n 1.0 right)
+    "#;
+
+    s.add_all_sexpr(SPACE_EXPRS.as_bytes()).unwrap();
+    s.metta_calculus(100);
+
+    let mut v = vec![];
+    s.dump_sexpr(expr!(s, "[2] sum $"), expr!(s, "_1"), &mut v);
+    let res = String::from_utf8_lossy_owned(v);
+
+    assert_eq!(res, "2\n")
+}
+
 fn sink_count() {
     let mut s = Space::new();
 
@@ -6229,6 +6251,7 @@ fn main() {
             sink_hash_expr();
             sink_even_half();
             sink_float_reduce();
+            sink_float_reduce_guarded();
 
             parse_csv();
             parse_json();
