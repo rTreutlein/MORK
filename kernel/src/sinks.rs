@@ -902,6 +902,11 @@ impl Sink for BaseRateSink {
             if new == group.old {
                 continue;
             }
+            let (_, old_c) = stv_parts(&group.old[..]);
+            let (_, new_c) = stv_parts(&new[..]);
+            if new_c < old_c {
+                continue;
+            }
             let mut old_fact = Vec::new();
             push_expr(&mut old_fact, "base-rate", &[pattern, &group.old[..]]);
             remove.insert(&old_fact[..], ());
