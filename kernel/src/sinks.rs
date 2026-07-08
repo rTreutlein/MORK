@@ -826,6 +826,10 @@ fn evidence_equal(left: &[u8], right: &[u8]) -> bool {
     evidence_set(left) == evidence_set(right)
 }
 
+fn is_inversion_snapshot_proof(proof_id: &[u8]) -> bool {
+    is_expr_head(proof_id, "scheduledInvN")
+}
+
 #[derive(Clone)]
 struct ProjectionEvidence {
     source: Vec<u8>,
@@ -1225,6 +1229,12 @@ impl Sink for ReviseProofsSink {
                 add.insert(&proved[..], ());
 
                 merged = Some(match merged {
+                    Some((ref old_stv, ref old_ev))
+                        if is_inversion_snapshot_proof(proof_id)
+                            && evidence_equal(old_ev, evset) =>
+                    {
+                        (stv.clone(), evset.clone())
+                    }
                     Some((ref old_stv, ref old_ev)) => {
                         merge_evidenced_stv(old_stv, old_ev, stv, evset)
                     }
