@@ -682,6 +682,13 @@ fn push_expr(out: &mut Vec<u8>, name: &str, args: &[&[u8]]) {
     }
 }
 
+fn push_raw_expr(out: &mut Vec<u8>, args: &[&[u8]]) {
+    out.push(item_byte(Tag::Arity(args.len() as u8)));
+    for arg in args {
+        out.extend_from_slice(arg);
+    }
+}
+
 fn expr_len(bytes: &[u8]) -> usize {
     match byte_item(bytes[0]) {
         Tag::Arity(arity) => {
@@ -915,6 +922,141 @@ impl Sink for BaseRateSink {
             AlgebraicStatus::None => true,
         };
         removed || added
+    }
+}
+
+pub struct PairCountsSink {
+    unique: PathMap<()>,
+}
+
+impl PairCountsSink {
+    fn pair_counts_from_values(values: &BTreeMap<Vec<u8>, u64>) -> Vec<u8> {
+        let mut pairs = Vec::new();
+        let one = symbol_bytes("1.0");
+        let mut pairs_by_value: Vec<_> = values.iter().collect();
+        pairs_by_value.sort_by(|(a, _), (b, _)| serialize(a).cmp(&serialize(b)));
+
+        for (value, count) in pairs_by_value {
+            let mass = if *count == 1 {
+                one.clone()
+            } else {
+                symbol_bytes(&format!("{count}.0"))
+            };
+            let mut pair = Vec::new();
+            push_raw_expr(&mut pair, &[value, &mass]);
+            pairs.push(pair);
+        }
+
+        let mut pair_list = Vec::new();
+        pair_list.push(item_byte(Tag::Arity(pairs.len() as u8)));
+        for pair in &pairs {
+            pair_list.extend_from_slice(pair);
+        }
+
+        let mut out = Vec::new();
+        push_expr(&mut out, "PairCounts", &[&pair_list]);
+        out
+    }
+}
+
+impl Sink for PairCountsSink {
+    fn new(_e: Expr) -> Self {
+        PairCountsSink {
+            unique: PathMap::new(),
+        }
+    }
+    fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
+        std::iter::once(WriteResourceRequest::BTM([].as_slice()))
+    }
+    fn sink<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+        path: &[u8],
+    ) where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        let mpath = &path[wz.root_prefix_path().len()..];
+        let args = expr_args(mpath);
+        assert_eq!(args.len(), 4, "pair-counts expects 3 payload args");
+        assert_eq!(symbol_str(args[0]), "pair-counts");
+        self.unique.insert(mpath, ());
+    }
+    fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+    ) -> bool
+    where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        wz.reset();
+
+        let mut groups: BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, u64>> = BTreeMap::new();
+        let mut outputs: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let mut output_vars: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+
+        for (path, ()) in self.unique.iter() {
+            let args = expr_args(&path);
+            let output = args[1].to_vec();
+            let output_var = args[2].to_vec();
+            let value = args[3].to_vec();
+            let mut key = output.clone();
+            key.extend_from_slice(&output_var);
+            outputs.entry(key.clone()).or_insert(output);
+            output_vars.entry(key.clone()).or_insert(output_var);
+            *groups.entry(key).or_default().entry(value).or_default() += 1;
+        }
+        self.unique = PathMap::new();
+
+        let mut changed = false;
+        let mut buffer: Vec<u8> = Vec::with_capacity(1 << 20);
+        for (key, values) in groups {
+            let output = outputs.get(&key).unwrap();
+            let output_var = output_vars.get(&key).unwrap();
+            let pair_counts = PairCountsSink::pair_counts_from_values(&values);
+
+            match byte_item(output_var[0]) {
+                Tag::VarRef(k) => {
+                    let ie = Expr {
+                        ptr: output.as_ptr().cast_mut(),
+                    };
+                    let mut replacement = pair_counts;
+                    let mut oz = ExprZipper::new(Expr {
+                        ptr: buffer.as_mut_ptr(),
+                    });
+                    ie.substitute_one_de_bruijn(
+                        k,
+                        Expr {
+                            ptr: replacement.as_mut_ptr(),
+                        },
+                        &mut oz,
+                    );
+                    unsafe { buffer.set_len(oz.loc) }
+                    wz.move_to_path(&buffer[wz.root_prefix_path().len()..oz.loc]);
+                    changed |= wz.set_val(()).is_none();
+                    buffer.clear();
+                }
+                Tag::NewVar => {
+                    wz.move_to_path(output);
+                    changed |= wz.set_val(()).is_none();
+                }
+                _ => {
+                    if output_var == &pair_counts[..] {
+                        wz.move_to_path(output);
+                        changed |= wz.set_val(()).is_none();
+                    }
+                }
+            }
+        }
+
+        changed
     }
 }
 
@@ -2402,6 +2544,7 @@ pub enum ASink {
     TailSink(HeadTailSink<false>),
     ReviseProofsSink(ReviseProofsSink),
     BaseRateSink(BaseRateSink),
+    PairCountsSink(PairCountsSink),
     CountSink(CountSink),
     HashSink(HashSink),
     SumSink(SumSink),
@@ -2487,6 +2630,12 @@ impl Sink for ASink {
                 && &*slice_from_raw_parts(e.ptr.offset(2), 14) == b"fold-base-rate"
         } {
             ASink::BaseRateSink(BaseRateSink::new(e))
+        } else if unsafe {
+            *e.ptr == item_byte(Tag::Arity(4))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(11))
+                && &*slice_from_raw_parts(e.ptr.offset(2), 11) == b"pair-counts"
+        } {
+            ASink::PairCountsSink(PairCountsSink::new(e))
         } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(4))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(5))
@@ -2658,6 +2807,11 @@ impl Sink for ASink {
                         yield i
                     }
                 }
+                ASink::PairCountsSink(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
                 ASink::CountSink(s) => {
                     for i in s.request().into_iter() {
                         yield i
@@ -2746,6 +2900,7 @@ impl Sink for ASink {
             ASink::TailSink(s) => s.sink(it, path),
             ASink::ReviseProofsSink(s) => s.sink(it, path),
             ASink::BaseRateSink(s) => s.sink(it, path),
+            ASink::PairCountsSink(s) => s.sink(it, path),
             ASink::CountSink(s) => s.sink(it, path),
             ASink::HashSink(s) => s.sink(it, path),
             ASink::SumSink(s) => s.sink(it, path),
@@ -2782,6 +2937,7 @@ impl Sink for ASink {
             ASink::TailSink(s) => s.finalize(it),
             ASink::ReviseProofsSink(s) => s.finalize(it),
             ASink::BaseRateSink(s) => s.finalize(it),
+            ASink::PairCountsSink(s) => s.finalize(it),
             ASink::CountSink(s) => s.finalize(it),
             ASink::HashSink(s) => s.finalize(it),
             ASink::SumSink(s) => s.finalize(it),
