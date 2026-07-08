@@ -1037,6 +1037,48 @@ fn fact_evidence_keys(evset: &[u8]) -> BTreeSet<Vec<u8>> {
         .collect()
 }
 
+fn expanded_fact_evidence_key(
+    key: &[u8],
+    proved: &BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
+    stack: &mut BTreeSet<Vec<u8>>,
+) -> BTreeSet<Vec<u8>> {
+    if !stack.insert(key.to_vec()) {
+        return BTreeSet::from([key.to_vec()]);
+    }
+    let expanded: BTreeSet<_> = proved
+        .get(key)
+        .into_iter()
+        .flat_map(|rows| rows.iter())
+        .filter_map(parse_scheduled_ctv_proof)
+        .flat_map(|proof| expanded_fact_evidence_keys_with_stack(&proof.evset, proved, stack))
+        .collect();
+    stack.remove(key);
+    if expanded.is_empty() {
+        BTreeSet::from([key.to_vec()])
+    } else {
+        expanded
+    }
+}
+
+fn expanded_fact_evidence_keys_with_stack(
+    evset: &[u8],
+    proved: &BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
+    stack: &mut BTreeSet<Vec<u8>>,
+) -> BTreeSet<Vec<u8>> {
+    evidence_set(evset)
+        .into_iter()
+        .filter_map(|item| fact_evidence_key(&item))
+        .flat_map(|key| expanded_fact_evidence_key(&key, proved, stack))
+        .collect()
+}
+
+fn expanded_fact_evidence_keys(
+    evset: &[u8],
+    proved: &BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
+) -> BTreeSet<Vec<u8>> {
+    expanded_fact_evidence_keys_with_stack(evset, proved, &mut BTreeSet::new())
+}
+
 fn residual_evidence(evset: &[u8], shared: &BTreeSet<Vec<u8>>) -> BTreeSet<Vec<u8>> {
     evidence_set(evset)
         .into_iter()
@@ -1045,6 +1087,29 @@ fn residual_evidence(evset: &[u8], shared: &BTreeSet<Vec<u8>>) -> BTreeSet<Vec<u
             None => true,
         })
         .collect()
+}
+
+fn expanded_residual_evidence(
+    evset: &[u8],
+    shared: &BTreeSet<Vec<u8>>,
+    proved: &BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
+) -> BTreeSet<Vec<u8>> {
+    let mut residual = BTreeSet::new();
+    for item in evidence_set(evset) {
+        match fact_evidence_key(&item) {
+            Some(key) => {
+                for expanded in expanded_fact_evidence_key(&key, proved, &mut BTreeSet::new()) {
+                    if !shared.contains(&expanded) {
+                        residual.insert(expanded);
+                    }
+                }
+            }
+            None => {
+                residual.insert(item);
+            }
+        }
+    }
+    residual
 }
 
 fn evidence_sets_pairwise_disjoint(sets: &[BTreeSet<Vec<u8>>]) -> bool {
@@ -1098,6 +1163,14 @@ fn proof_matches_certain_shared_conj(proof: &ScheduledCtvProof) -> bool {
         &proof.neg,
     );
     stv_strength_close(&proof.stv, &expected)
+}
+
+fn fold_stvs(mut stvs: impl Iterator<Item = Vec<u8>>) -> Option<Vec<u8>> {
+    let mut acc = stvs.next()?;
+    for stv in stvs {
+        acc = and_stv(&acc, &stv);
+    }
+    Some(acc)
 }
 
 fn union_proof_evidence(proofs: &[ScheduledCtvProof]) -> Vec<u8> {
@@ -1162,6 +1235,258 @@ fn factor_merge_all_shared_proofs(rows: &BTreeSet<ProofRow>) -> Option<(Vec<u8>,
     }
 
     let merged = OrStvSink::mp_stv(&override_true, &revised_pos?, &revised_neg?);
+    Some((merged, union_proof_evidence(&proofs)))
+}
+
+fn packed_stv(bytes: &[u8]) -> Option<Vec<u8>> {
+    if !matches!(byte_item(bytes[0]), Tag::Arity(2)) {
+        return None;
+    }
+    let args = expr_args(bytes);
+    if args.iter().all(|arg| {
+        matches!(byte_item(arg[0]), Tag::SymbolSize(_)) && symbol_str(arg).parse::<f64>().is_ok()
+    }) {
+        Some(bytes.to_vec())
+    } else {
+        None
+    }
+}
+
+fn fact_row(path: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    if !matches!(byte_item(path[0]), Tag::Arity(_)) {
+        return None;
+    }
+    let args = expr_args(path);
+    if args.len() == 3 && is_symbol(args[0], "fact") {
+        Some((args[1].to_vec(), packed_stv(args[2])?))
+    } else {
+        None
+    }
+}
+
+fn proved_row(path: &[u8]) -> Option<(Vec<u8>, ProofRow)> {
+    if !matches!(byte_item(path[0]), Tag::Arity(_)) {
+        return None;
+    }
+    let args = expr_args(path);
+    if args.len() == 5 && is_symbol(args[0], "proved") {
+        Some((
+            args[1].to_vec(),
+            (args[2].to_vec(), args[3].to_vec(), args[4].to_vec()),
+        ))
+    } else {
+        None
+    }
+}
+
+fn collect_fact_stvs<Z>(root: &Z) -> BTreeMap<Vec<u8>, Vec<u8>>
+where
+    Z: ZipperForking<()>,
+{
+    let mut facts: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+    let mut rz = root.fork_read_zipper();
+    while rz.to_next_val() {
+        if let Some((goal, stv)) = fact_row(rz.origin_path()) {
+            match facts.get(&goal) {
+                Some(old) if stv_parts(old).1 >= stv_parts(&stv).1 => {}
+                _ => {
+                    facts.insert(goal, stv);
+                }
+            }
+        }
+    }
+    facts
+}
+
+fn collect_proved_rows<Z>(root: &Z) -> BTreeMap<Vec<u8>, BTreeSet<ProofRow>>
+where
+    Z: ZipperForking<()>,
+{
+    let mut proved: BTreeMap<Vec<u8>, BTreeSet<ProofRow>> = BTreeMap::new();
+    let mut rz = root.fork_read_zipper();
+    while rz.to_next_val() {
+        if let Some((goal, row)) = proved_row(rz.origin_path()) {
+            proved.entry(goal).or_default().insert(row);
+        }
+    }
+    proved
+}
+
+fn eval_scheduled_proof_with(
+    proof: &ScheduledCtvProof,
+    shared: &BTreeSet<Vec<u8>>,
+    facts: &BTreeMap<Vec<u8>, Vec<u8>>,
+    proved: &BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
+    shared_override: &[u8],
+    stack: &mut BTreeSet<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    let aggregate = fold_stvs(
+        proof
+            .premises
+            .iter()
+            .map(|premise| eval_goal_with(premise, shared, facts, proved, shared_override, stack))
+            .collect::<Option<Vec<_>>>()?
+            .into_iter(),
+    )?;
+    Some(OrStvSink::mp_stv(&aggregate, &proof.pos, &proof.neg))
+}
+
+fn merge_proof_results(rows: Vec<(Vec<u8>, Vec<u8>)>) -> Option<Vec<u8>> {
+    let mut rows = rows.into_iter();
+    let (mut merged_stv, mut merged_evset) = rows.next()?;
+    for (stv, evset) in rows {
+        let (next_stv, next_evset) = merge_evidenced_stv(&merged_stv, &merged_evset, &stv, &evset);
+        merged_stv = next_stv;
+        merged_evset = next_evset;
+    }
+    Some(merged_stv)
+}
+
+fn eval_goal_with(
+    goal: &[u8],
+    shared: &BTreeSet<Vec<u8>>,
+    facts: &BTreeMap<Vec<u8>, Vec<u8>>,
+    proved: &BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
+    shared_override: &[u8],
+    stack: &mut BTreeSet<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    if shared.contains(goal) {
+        return Some(shared_override.to_vec());
+    }
+    if !stack.insert(goal.to_vec()) {
+        return facts.get(goal).cloned();
+    }
+    let result = proved.get(goal).and_then(|rows| {
+        merge_proof_results(
+            rows.iter()
+                .filter_map(|row| {
+                    let proof = parse_scheduled_ctv_proof(row)?;
+                    let stv = eval_scheduled_proof_with(
+                        &proof,
+                        shared,
+                        facts,
+                        proved,
+                        shared_override,
+                        stack,
+                    )?;
+                    Some((stv, proof.evset))
+                })
+                .collect(),
+        )
+    });
+    stack.remove(goal);
+    result.or_else(|| facts.get(goal).cloned())
+}
+
+fn actual_proof_stv(
+    proof: &ScheduledCtvProof,
+    facts: &BTreeMap<Vec<u8>, Vec<u8>>,
+    proved: &BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
+) -> Option<Vec<u8>> {
+    let aggregate = fold_stvs(
+        proof
+            .premises
+            .iter()
+            .map(|premise| {
+                eval_goal_with(
+                    premise,
+                    &BTreeSet::new(),
+                    facts,
+                    proved,
+                    &stv_bytes(1.0, 1.0),
+                    &mut BTreeSet::new(),
+                )
+            })
+            .collect::<Option<Vec<_>>>()?
+            .into_iter(),
+    )?;
+    Some(OrStvSink::mp_stv(&aggregate, &proof.pos, &proof.neg))
+}
+
+fn shared_conjunction_stv(
+    shared: &BTreeSet<Vec<u8>>,
+    facts: &BTreeMap<Vec<u8>, Vec<u8>>,
+) -> Option<Vec<u8>> {
+    fold_stvs(
+        shared
+            .iter()
+            .map(|premise| facts.get(premise).cloned())
+            .collect::<Option<Vec<_>>>()?
+            .into_iter(),
+    )
+}
+
+fn factor_merge_with_fact_stvs(
+    rows: &BTreeSet<ProofRow>,
+    facts: &BTreeMap<Vec<u8>, Vec<u8>>,
+    proved: &BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    if rows.len() < 2 {
+        return None;
+    }
+    let proofs: Vec<_> = rows
+        .iter()
+        .map(parse_scheduled_ctv_proof)
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut shared = expanded_fact_evidence_keys(&proofs.first()?.evset, proved);
+    for proof in proofs.iter().skip(1) {
+        let keys = expanded_fact_evidence_keys(&proof.evset, proved);
+        shared = shared.intersection(&keys).cloned().collect();
+    }
+    if shared.is_empty() || !shared.iter().all(|key| facts.contains_key(key)) {
+        return None;
+    }
+
+    let residuals: Vec<_> = proofs
+        .iter()
+        .map(|proof| expanded_residual_evidence(&proof.evset, &shared, proved))
+        .collect();
+    if !evidence_sets_pairwise_disjoint(&residuals) {
+        return None;
+    }
+
+    if !proofs.iter().all(|proof| {
+        actual_proof_stv(proof, facts, proved)
+            .map(|actual| stv_strength_close(&proof.stv, &actual))
+            .unwrap_or(false)
+    }) {
+        return None;
+    }
+
+    let override_true = stv_bytes(1.0, 1.0);
+    let override_false = stv_bytes(0.0, 1.0);
+    let mut revised_pos: Option<Vec<u8>> = None;
+    let mut revised_neg: Option<Vec<u8>> = None;
+    for proof in &proofs {
+        let pos = eval_scheduled_proof_with(
+            proof,
+            &shared,
+            facts,
+            proved,
+            &override_true,
+            &mut BTreeSet::new(),
+        )?;
+        let neg = eval_scheduled_proof_with(
+            proof,
+            &shared,
+            facts,
+            proved,
+            &override_false,
+            &mut BTreeSet::new(),
+        )?;
+        revised_pos = Some(match revised_pos {
+            Some(ref old) => revise_stv(old, &pos),
+            None => pos,
+        });
+        revised_neg = Some(match revised_neg {
+            Some(ref old) => revise_stv(old, &neg),
+            None => neg,
+        });
+    }
+
+    let shared_stv = shared_conjunction_stv(&shared, facts)?;
+    let merged = OrStvSink::mp_stv(&shared_stv, &revised_pos?, &revised_neg?);
     Some((merged, union_proof_evidence(&proofs)))
 }
 
@@ -1915,16 +2240,32 @@ impl Sink for ReviseProofsSink {
         wz.reset();
         let mut remove = PathMap::new();
         let mut add = PathMap::new();
+        let mut fact_stvs = None;
+        let mut proved_rows = None;
 
         for (goal, group) in &self.groups {
             let mut factor_rows = BTreeSet::new();
             if group.old_facts.is_empty() {
                 factor_rows.extend(group.proofs.iter().cloned());
-            } else if !group.existing_proofs.is_empty() {
+            } else {
                 factor_rows.extend(group.existing_proofs.iter().cloned());
-                factor_rows.extend(group.proofs.iter().cloned());
+                let proved = proved_rows.get_or_insert_with(|| collect_proved_rows(wz));
+                if let Some(rows) = proved.get(goal) {
+                    factor_rows.extend(rows.iter().cloned());
+                }
+                if !factor_rows.is_empty() {
+                    factor_rows.extend(group.proofs.iter().cloned());
+                }
             }
-            let factored = factor_merge_all_shared_proofs(&factor_rows);
+            let factored = if factor_rows.len() >= 2 {
+                factor_merge_all_shared_proofs(&factor_rows).or_else(|| {
+                    let facts = fact_stvs.get_or_insert_with(|| collect_fact_stvs(wz));
+                    let proved = proved_rows.get_or_insert_with(|| collect_proved_rows(wz));
+                    factor_merge_with_fact_stvs(&factor_rows, facts, proved)
+                })
+            } else {
+                None
+            };
             let mut merged = factored
                 .clone()
                 .or_else(|| group.old_facts.iter().next().cloned());
