@@ -660,9 +660,12 @@ impl <const head: bool> Sink for HeadTailSink<head> {
 
 #[derive(Default)]
 struct ProofGroup {
-    proofs: BTreeSet<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    proofs: BTreeSet<ProofRow>,
+    existing_proofs: BTreeSet<ProofRow>,
     old_facts: BTreeSet<(Vec<u8>, Vec<u8>)>,
 }
+
+type ProofRow = (Vec<u8>, Vec<u8>, Vec<u8>);
 
 pub struct ReviseProofsSink {
     groups: BTreeMap<Vec<u8>, ProofGroup>,
@@ -959,6 +962,207 @@ fn merge_evidenced_stv(
     } else {
         (revise_stv(old_stv, new_stv), evidence_union(old_ev, new_ev))
     }
+}
+
+#[derive(Clone)]
+struct ScheduledCtvProof {
+    stv: Vec<u8>,
+    evset: Vec<u8>,
+    pos: Vec<u8>,
+    neg: Vec<u8>,
+    premises: Vec<Vec<u8>>,
+}
+
+fn collect_pcons(bytes: &[u8], out: &mut Vec<Vec<u8>>) -> bool {
+    if is_symbol(bytes, "pnil") {
+        return true;
+    }
+    if let Tag::Arity(_) = byte_item(bytes[0]) {
+        let args = expr_args(bytes);
+        if args.len() == 3 && is_symbol(args[0], "pcons") {
+            out.push(args[1].to_vec());
+            return collect_pcons(args[2], out);
+        }
+    }
+    false
+}
+
+fn parse_scheduled_ctv_proof(row: &ProofRow) -> Option<ScheduledCtvProof> {
+    let (stv, proof_id, evset) = row;
+    if !matches!(byte_item(proof_id[0]), Tag::Arity(_)) {
+        return None;
+    }
+    let proof_args = expr_args(proof_id);
+    if proof_args.len() != 4 || !is_symbol(proof_args[0], "scheduledN") {
+        return None;
+    }
+    if !matches!(byte_item(proof_args[2][0]), Tag::Arity(_)) {
+        return None;
+    }
+    let rule_args = expr_args(proof_args[2]);
+    if rule_args.len() != 3 || !is_symbol(rule_args[0], "ctv") {
+        return None;
+    }
+
+    let mut premises = Vec::new();
+    if !collect_pcons(proof_args[3], &mut premises) || premises.is_empty() {
+        return None;
+    }
+
+    Some(ScheduledCtvProof {
+        stv: stv.clone(),
+        evset: evset.clone(),
+        pos: rule_args[1].to_vec(),
+        neg: rule_args[2].to_vec(),
+        premises,
+    })
+}
+
+fn fact_evidence_key(item: &[u8]) -> Option<Vec<u8>> {
+    if !matches!(byte_item(item[0]), Tag::Arity(_)) {
+        return None;
+    }
+    let args = expr_args(item);
+    if args.len() == 2 && is_symbol(args[0], "fact-ev") {
+        Some(args[1].to_vec())
+    } else {
+        None
+    }
+}
+
+fn fact_evidence_keys(evset: &[u8]) -> BTreeSet<Vec<u8>> {
+    evidence_set(evset)
+        .into_iter()
+        .filter_map(|item| fact_evidence_key(&item))
+        .collect()
+}
+
+fn residual_evidence(evset: &[u8], shared: &BTreeSet<Vec<u8>>) -> BTreeSet<Vec<u8>> {
+    evidence_set(evset)
+        .into_iter()
+        .filter(|item| match fact_evidence_key(item) {
+            Some(key) => !shared.contains(&key),
+            None => true,
+        })
+        .collect()
+}
+
+fn evidence_sets_pairwise_disjoint(sets: &[BTreeSet<Vec<u8>>]) -> bool {
+    for (idx, left) in sets.iter().enumerate() {
+        for right in &sets[idx + 1..] {
+            if left.iter().any(|item| right.contains(item)) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn and_stv(left: &[u8], right: &[u8]) -> Vec<u8> {
+    let (left_s, left_c) = stv_parts(left);
+    let (right_s, right_c) = stv_parts(right);
+    let strength = left_s * right_s;
+    let confidence = if left_c <= 0.0 || right_c <= 0.0 {
+        0.0
+    } else {
+        OrStvSink::ideal_prod_confidence(
+            left_s,
+            OrStvSink::ideal_var(left_s, left_c),
+            right_s,
+            OrStvSink::ideal_var(right_s, right_c),
+            strength,
+        )
+    };
+    stv_bytes(strength, confidence)
+}
+
+fn repeated_and_stv(count: usize, strength: f64, confidence: f64) -> Vec<u8> {
+    let leaf = stv_bytes(strength, confidence);
+    let mut acc = leaf.clone();
+    for _ in 1..count {
+        acc = and_stv(&acc, &leaf);
+    }
+    acc
+}
+
+fn stv_strength_close(left: &[u8], right: &[u8]) -> bool {
+    let (left_s, _) = stv_parts(left);
+    let (right_s, _) = stv_parts(right);
+    (left_s - right_s).abs() < 0.000001
+}
+
+fn proof_matches_certain_shared_conj(proof: &ScheduledCtvProof) -> bool {
+    let expected = OrStvSink::mp_stv(
+        &repeated_and_stv(proof.premises.len(), 1.0, 1.0),
+        &proof.pos,
+        &proof.neg,
+    );
+    stv_strength_close(&proof.stv, &expected)
+}
+
+fn union_proof_evidence(proofs: &[ScheduledCtvProof]) -> Vec<u8> {
+    proofs.iter().fold(symbol_bytes("pnil"), |acc, proof| {
+        evidence_union(&acc, &proof.evset)
+    })
+}
+
+fn factor_merge_all_shared_proofs(rows: &BTreeSet<ProofRow>) -> Option<(Vec<u8>, Vec<u8>)> {
+    if rows.len() < 2 {
+        return None;
+    }
+    let proofs: Vec<_> = rows
+        .iter()
+        .map(parse_scheduled_ctv_proof)
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut shared = fact_evidence_keys(&proofs.first()?.evset);
+    for proof in proofs.iter().skip(1) {
+        let keys = fact_evidence_keys(&proof.evset);
+        shared = shared.intersection(&keys).cloned().collect();
+    }
+    if shared.is_empty() {
+        return None;
+    }
+
+    let premise_count = proofs.first()?.premises.len();
+    if !proofs.iter().all(|proof| {
+        proof.premises.len() == premise_count
+            && proof
+                .premises
+                .iter()
+                .all(|premise| shared.contains(premise))
+            && proof_matches_certain_shared_conj(proof)
+    }) {
+        return None;
+    }
+
+    let residuals: Vec<_> = proofs
+        .iter()
+        .map(|proof| residual_evidence(&proof.evset, &shared))
+        .collect();
+    if !evidence_sets_pairwise_disjoint(&residuals) {
+        return None;
+    }
+
+    let override_true = repeated_and_stv(premise_count, 1.0, 1.0);
+    let override_false = repeated_and_stv(premise_count, 0.0, 1.0);
+    let mut revised_pos: Option<Vec<u8>> = None;
+    let mut revised_neg: Option<Vec<u8>> = None;
+    for proof in &proofs {
+        let pos = OrStvSink::mp_stv(&override_true, &proof.pos, &proof.neg);
+        let neg = OrStvSink::mp_stv(&override_false, &proof.pos, &proof.neg);
+        revised_pos = Some(match revised_pos {
+            Some(ref old) => revise_stv(old, &pos),
+            None => pos,
+        });
+        revised_neg = Some(match revised_neg {
+            Some(ref old) => revise_stv(old, &neg),
+            None => neg,
+        });
+    }
+
+    let merged = OrStvSink::mp_stv(&override_true, &revised_pos?, &revised_neg?);
+    Some((merged, union_proof_evidence(&proofs)))
 }
 
 #[derive(Default)]
@@ -1662,8 +1866,8 @@ impl Sink for ReviseProofsSink {
         let mpath = &path[wz.root_prefix_path().len()..];
         let args = expr_args(mpath);
         assert!(
-            args.len() == 4 || args.len() == 5 || args.len() == 7,
-            "revise-proofs expects 3, 4, or 6 payload args"
+            args.len() == 4 || args.len() == 5 || args.len() == 6 || args.len() == 7,
+            "revise-proofs expects 3, 4, 5, or 6 payload args"
         );
         assert_eq!(symbol_str(args[0]), "revise-proofs");
 
@@ -1679,6 +1883,14 @@ impl Sink for ReviseProofsSink {
                 group
                     .proofs
                     .insert((args[3].to_vec(), args[2].to_vec(), args[4].to_vec()));
+            }
+            6 => {
+                assert_eq!(symbol_str(args[2]), "existing");
+                group.existing_proofs.insert((
+                    args[4].to_vec(),
+                    args[3].to_vec(),
+                    args[5].to_vec(),
+                ));
             }
             7 => {
                 group
@@ -1705,7 +1917,17 @@ impl Sink for ReviseProofsSink {
         let mut add = PathMap::new();
 
         for (goal, group) in &self.groups {
-            let mut merged = group.old_facts.iter().next().cloned();
+            let mut factor_rows = BTreeSet::new();
+            if group.old_facts.is_empty() {
+                factor_rows.extend(group.proofs.iter().cloned());
+            } else if !group.existing_proofs.is_empty() {
+                factor_rows.extend(group.existing_proofs.iter().cloned());
+                factor_rows.extend(group.proofs.iter().cloned());
+            }
+            let factored = factor_merge_all_shared_proofs(&factor_rows);
+            let mut merged = factored
+                .clone()
+                .or_else(|| group.old_facts.iter().next().cloned());
             for (old_stv, old_ev) in &group.old_facts {
                 let mut fact = Vec::new();
                 push_expr(&mut fact, "fact", &[goal, old_stv]);
@@ -1728,18 +1950,20 @@ impl Sink for ReviseProofsSink {
                 push_expr(&mut proved, "proved", &[goal, stv, proof_id, evset]);
                 add.insert(&proved[..], ());
 
-                merged = Some(match merged {
-                    Some((ref old_stv, ref old_ev))
-                        if is_inversion_snapshot_proof(proof_id)
-                            && evidence_equal(old_ev, evset) =>
-                    {
-                        (stv.clone(), evset.clone())
-                    }
-                    Some((ref old_stv, ref old_ev)) => {
-                        merge_evidenced_stv(old_stv, old_ev, stv, evset)
-                    }
-                    None => (stv.clone(), evset.clone()),
-                });
+                if factored.is_none() {
+                    merged = Some(match merged {
+                        Some((ref old_stv, ref old_ev))
+                            if is_inversion_snapshot_proof(proof_id)
+                                && evidence_equal(old_ev, evset) =>
+                        {
+                            (stv.clone(), evset.clone())
+                        }
+                        Some((ref old_stv, ref old_ev)) => {
+                            merge_evidenced_stv(old_stv, old_ev, stv, evset)
+                        }
+                        None => (stv.clone(), evset.clone()),
+                    });
+                }
             }
             if let Some((stv, evset)) = merged {
                 let mut fact = Vec::new();
@@ -3214,6 +3438,7 @@ impl Sink for ASink {
         } else if unsafe {
             (*e.ptr == item_byte(Tag::Arity(4))
                 || *e.ptr == item_byte(Tag::Arity(5))
+                || *e.ptr == item_byte(Tag::Arity(6))
                 || *e.ptr == item_byte(Tag::Arity(7)))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(13))
                 && *e.ptr.offset(2) == b'r'
