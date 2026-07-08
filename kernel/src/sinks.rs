@@ -1312,6 +1312,156 @@ impl Sink for OrStvSink {
     }
 }
 
+pub struct TotalEvidenceMpSink {
+    unique: PathMap<()>,
+}
+
+type TotalEvidenceMpKey = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+type TotalEvidenceMpRow = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
+impl TotalEvidenceMpSink {
+    fn fold_or(rows: &mut [TotalEvidenceMpRow]) -> Vec<u8> {
+        rows.sort_by(
+            |(_, left_stv, left_proof, _), (_, right_stv, right_proof, _)| {
+                let (left_s, _) = stv_parts(left_stv);
+                let (right_s, _) = stv_parts(right_stv);
+                right_s
+                    .partial_cmp(&left_s)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| serialize(left_proof).cmp(&serialize(right_proof)))
+            },
+        );
+
+        let mut acc: Option<Vec<u8>> = None;
+        for (_, stv, _, _) in rows {
+            acc = Some(match acc {
+                Some(ref current) => OrStvSink::or_stv(current, stv),
+                None => stv.clone(),
+            });
+        }
+        acc.unwrap_or_else(|| stv_bytes(0.0, 0.0))
+    }
+
+    fn proof_id(proof_id: &[u8], rows: &[TotalEvidenceMpRow]) -> Vec<u8> {
+        let proof_ids: Vec<&[u8]> = rows
+            .iter()
+            .map(|(_, _, proof, _)| proof.as_slice())
+            .collect();
+        let mut foldall = Vec::new();
+        push_expr(&mut foldall, "foldall-proof", &proof_ids);
+
+        let mut proof = Vec::new();
+        push_expr(
+            &mut proof,
+            "total-evidence-proof",
+            &[proof_id, &foldall[..]],
+        );
+        proof
+    }
+}
+
+impl Sink for TotalEvidenceMpSink {
+    fn new(_e: Expr) -> Self {
+        TotalEvidenceMpSink {
+            unique: PathMap::new(),
+        }
+    }
+    fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
+        std::iter::once(WriteResourceRequest::BTM([].as_slice()))
+    }
+    fn sink<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+        path: &[u8],
+    ) where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        let mpath = &path[wz.root_prefix_path().len()..];
+        let args = expr_args(mpath);
+        assert_eq!(args.len(), 11, "total-evidence-mp expects 11 payload args");
+        assert_eq!(symbol_str(args[0]), "total-evidence-mp");
+        self.unique.insert(mpath, ());
+    }
+    fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+    ) -> bool
+    where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        wz.reset();
+
+        let mut groups: BTreeMap<TotalEvidenceMpKey, Vec<TotalEvidenceMpRow>> = BTreeMap::new();
+        for (path, ()) in self.unique.iter() {
+            let args = expr_args(&path);
+            if args[4] == args[5] {
+                continue;
+            }
+            let key = (
+                args[1].to_vec(),
+                args[2].to_vec(),
+                args[3].to_vec(),
+                args[4].to_vec(),
+                args[5].to_vec(),
+                args[10].to_vec(),
+            );
+            groups.entry(key).or_default().push((
+                args[6].to_vec(),
+                args[7].to_vec(),
+                args[8].to_vec(),
+                args[9].to_vec(),
+            ));
+        }
+        self.unique = PathMap::new();
+
+        let mut add = PathMap::new();
+        for ((goal, proof_id, ante_stv, _p1, _p2, ante_evset), rows) in groups {
+            let mut pos_rows = Vec::new();
+            let mut neg_rows = Vec::new();
+            let mut evidence = ante_evset;
+
+            for row in rows {
+                evidence = evidence_union(&evidence, &row.3);
+                if is_symbol(&row.0, "pos") {
+                    pos_rows.push(row);
+                } else if is_symbol(&row.0, "neg") {
+                    neg_rows.push(row);
+                }
+            }
+
+            let pos = Self::fold_or(&mut pos_rows);
+            let neg = Self::fold_or(&mut neg_rows);
+            let proof_stv = OrStvSink::mp_stv(&ante_stv, &pos, &neg);
+
+            let mut proof_rows = pos_rows;
+            proof_rows.extend(neg_rows);
+            let proof = Self::proof_id(&proof_id, &proof_rows);
+
+            let mut open_proof = Vec::new();
+            push_expr(
+                &mut open_proof,
+                "open-proof",
+                &[&goal[..], &proof_stv[..], &proof[..], &evidence[..]],
+            );
+            add.insert(&open_proof[..], ());
+        }
+
+        match wz.join_into(&add.read_zipper()) {
+            AlgebraicStatus::Element => true,
+            AlgebraicStatus::Identity => false,
+            AlgebraicStatus::None => true,
+        }
+    }
+}
+
 impl Sink for ReviseProofsSink {
     fn new(_e: Expr) -> Self {
         ReviseProofsSink {
@@ -2804,6 +2954,7 @@ pub enum ASink {
     BaseRateSink(BaseRateSink),
     PairCountsSink(PairCountsSink),
     OrStvSink(OrStvSink),
+    TotalEvidenceMpSink(TotalEvidenceMpSink),
     CountSink(CountSink),
     HashSink(HashSink),
     SumSink(SumSink),
@@ -2901,6 +3052,12 @@ impl Sink for ASink {
                 && &*slice_from_raw_parts(e.ptr.offset(2), 6) == b"or-stv"
         } {
             ASink::OrStvSink(OrStvSink::new(e))
+        } else if unsafe {
+            *e.ptr == item_byte(Tag::Arity(11))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(17))
+                && &*slice_from_raw_parts(e.ptr.offset(2), 17) == b"total-evidence-mp"
+        } {
+            ASink::TotalEvidenceMpSink(TotalEvidenceMpSink::new(e))
         } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(4))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(5))
@@ -3082,6 +3239,11 @@ impl Sink for ASink {
                         yield i
                     }
                 }
+                ASink::TotalEvidenceMpSink(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
                 ASink::CountSink(s) => {
                     for i in s.request().into_iter() {
                         yield i
@@ -3172,6 +3334,7 @@ impl Sink for ASink {
             ASink::BaseRateSink(s) => s.sink(it, path),
             ASink::PairCountsSink(s) => s.sink(it, path),
             ASink::OrStvSink(s) => s.sink(it, path),
+            ASink::TotalEvidenceMpSink(s) => s.sink(it, path),
             ASink::CountSink(s) => s.sink(it, path),
             ASink::HashSink(s) => s.sink(it, path),
             ASink::SumSink(s) => s.sink(it, path),
@@ -3210,6 +3373,7 @@ impl Sink for ASink {
             ASink::BaseRateSink(s) => s.finalize(it),
             ASink::PairCountsSink(s) => s.finalize(it),
             ASink::OrStvSink(s) => s.finalize(it),
+            ASink::TotalEvidenceMpSink(s) => s.finalize(it),
             ASink::CountSink(s) => s.finalize(it),
             ASink::HashSink(s) => s.finalize(it),
             ASink::SumSink(s) => s.finalize(it),
