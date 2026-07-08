@@ -3,7 +3,7 @@ use eval::{EvalScope, FuncType};
 use eval_ffi::{EvalError, ExprSink, ExprSource, Tag};
 use hex;
 use log::trace;
-use mork_expr::SourceItem;
+use mork_expr::{SourceItem, byte_item, item_byte};
 use std::io::Write;
 use std::ops::Div;
 
@@ -869,6 +869,11 @@ fn pln_ideal_conf_from_var(strength: f64, var: f64) -> f64 {
     (n / (n + PLN_EVIDENCE_CONFIDENCE_K)).max(0.000001)
 }
 
+fn pln_marginal_proj_confidence(sab: f64, cab: f64) -> f64 {
+    let count = sab * pln_confidence_to_count(cab);
+    count / (count + PLN_EVIDENCE_CONFIDENCE_K)
+}
+
 fn pln_and_confidence(s1: f64, c1: f64, s2: f64, c2: f64) -> f64 {
     if c1 <= 0.0 || c2 <= 0.0 {
         return 0.0;
@@ -968,7 +973,9 @@ pub extern "C" fn pln_inv_confidence_f64(
     let sink = unsafe { &mut *sink };
     let items = expr.consume_head_check(b"pln_inv_confidence_f64")?;
     if items != 6 {
-        return Err(EvalError::from("pln_inv_confidence_f64 takes six arguments"));
+        return Err(EvalError::from(
+            "pln_inv_confidence_f64 takes six arguments",
+        ));
     }
     let sa = expr.consume::<f64>()?;
     let ca = expr.consume::<f64>()?;
@@ -1049,6 +1056,447 @@ pub extern "C" fn pln_and_confidence_f64(
     Ok(())
 }
 
+fn pool_symbol_bytes(s: &str) -> Vec<u8> {
+    let mut out = vec![item_byte(Tag::SymbolSize(s.len() as u8))];
+    out.extend_from_slice(s.as_bytes());
+    out
+}
+
+fn pool_push_expr(out: &mut Vec<u8>, name: &str, args: &[&[u8]]) {
+    out.push(item_byte(Tag::Arity((args.len() + 1) as u8)));
+    out.extend_from_slice(&pool_symbol_bytes(name));
+    for arg in args {
+        out.extend_from_slice(arg);
+    }
+}
+
+fn pool_item_len(bytes: &[u8]) -> usize {
+    match byte_item(bytes[0]) {
+        Tag::SymbolSize(size) => 1 + size as usize,
+        Tag::Arity(arity) => {
+            let mut offset = 1;
+            for _ in 0..arity {
+                let len = pool_item_len(&bytes[offset..]);
+                offset += len;
+            }
+            offset
+        }
+        Tag::NewVar | Tag::VarRef(_) => 1,
+    }
+}
+
+fn pool_expr_args(bytes: &[u8]) -> Vec<&[u8]> {
+    let Tag::Arity(arity) = byte_item(bytes[0]) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(arity as usize);
+    let mut offset = 1;
+    for _ in 0..arity {
+        let len = pool_item_len(&bytes[offset..]);
+        out.push(&bytes[offset..offset + len]);
+        offset += len;
+    }
+    out
+}
+
+fn pool_is_symbol(bytes: &[u8], name: &str) -> bool {
+    let Tag::SymbolSize(size) = byte_item(bytes[0]) else {
+        return false;
+    };
+    size as usize == name.len() && &bytes[1..1 + size as usize] == name.as_bytes()
+}
+
+fn pool_symbol_str(bytes: &[u8]) -> Option<&str> {
+    let Tag::SymbolSize(size) = byte_item(bytes[0]) else {
+        return None;
+    };
+    std::str::from_utf8(&bytes[1..1 + size as usize]).ok()
+}
+
+fn pool_stv_parts(stv: &[u8]) -> Option<(f64, f64)> {
+    let args = pool_expr_args(stv);
+    if args.len() != 2 {
+        return None;
+    }
+    Some((
+        pool_symbol_str(args[0])?.parse::<f64>().ok()?,
+        pool_symbol_str(args[1])?.parse::<f64>().ok()?,
+    ))
+}
+
+fn pool_f64_string(value: f64) -> String {
+    let text = value.to_string();
+    if text.contains('.') || text.contains('e') || text.contains('E') {
+        text
+    } else {
+        format!("{text}.0")
+    }
+}
+
+fn pool_stv_bytes(strength: f64, confidence: f64) -> Vec<u8> {
+    let strength_s = pool_symbol_bytes(&pool_f64_string(strength));
+    let confidence_s = pool_symbol_bytes(&pool_f64_string(confidence));
+    let mut out = Vec::new();
+    out.push(item_byte(Tag::Arity(2)));
+    out.extend_from_slice(&strength_s);
+    out.extend_from_slice(&confidence_s);
+    out
+}
+
+fn pool_and_stv(left: &[u8], right: &[u8]) -> Option<Vec<u8>> {
+    let (s1, c1) = pool_stv_parts(left)?;
+    let (s2, c2) = pool_stv_parts(right)?;
+    Some(pool_stv_bytes(s1 * s2, pln_and_confidence(s1, c1, s2, c2)))
+}
+
+fn pool_collect_evidence(bytes: &[u8], out: &mut Vec<Vec<u8>>) {
+    if pool_is_symbol(bytes, "pnil") {
+        return;
+    }
+    if let Tag::Arity(_) = byte_item(bytes[0]) {
+        let args = pool_expr_args(bytes);
+        if args.len() == 3 && pool_is_symbol(args[0], "pcons") {
+            pool_collect_evidence(args[1], out);
+            pool_collect_evidence(args[2], out);
+            return;
+        }
+    }
+    if !out.iter().any(|item| item == bytes) {
+        out.push(bytes.to_vec());
+    }
+}
+
+fn pool_evidence_items(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    pool_collect_evidence(bytes, &mut out);
+    out
+}
+
+fn pool_evidence_list(items: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = pool_symbol_bytes("pnil");
+    for item in items.iter().rev() {
+        let mut next = Vec::new();
+        pool_push_expr(&mut next, "pcons", &[item, &out]);
+        out = next;
+    }
+    out
+}
+
+fn pool_evidence_union(left: &[u8], right: &[u8]) -> Vec<u8> {
+    let mut items = pool_evidence_items(left);
+    for item in pool_evidence_items(right) {
+        if !items.contains(&item) {
+            items.push(item);
+        }
+    }
+    pool_evidence_list(&items)
+}
+
+fn pool_evidence_overlaps(left: &[u8], right: &[u8]) -> bool {
+    let left = pool_evidence_items(left);
+    pool_evidence_items(right)
+        .iter()
+        .any(|item| left.contains(item))
+}
+
+#[derive(Clone)]
+struct PoolProjection {
+    source: Vec<u8>,
+    source_stv: Vec<u8>,
+    arity: usize,
+    idx: Vec<u8>,
+    marginal_stv: Vec<u8>,
+}
+
+fn pool_and_arity(source: &[u8]) -> Option<usize> {
+    let scoped = pool_expr_args(source);
+    if scoped.len() != 2 {
+        return None;
+    }
+    let ty = pool_expr_args(scoped[1]);
+    if ty.len() >= 2 && pool_is_symbol(ty[0], "And") {
+        Some(ty.len() - 1)
+    } else {
+        None
+    }
+}
+
+fn pool_projection_idx(proj_id: &[u8]) -> Option<&[u8]> {
+    let args = pool_expr_args(proj_id);
+    if args.len() >= 3 && pool_is_symbol(args[0], "marginal-proj") {
+        Some(args[1])
+    } else {
+        None
+    }
+}
+
+fn pool_projection_info(evset: &[u8], prem_stv: &[u8]) -> Option<PoolProjection> {
+    for item in pool_evidence_items(evset) {
+        let args = pool_expr_args(&item);
+        if args.len() == 5 && pool_is_symbol(args[0], "projection-ev") {
+            let Some(idx) = pool_projection_idx(args[1]) else {
+                continue;
+            };
+            let Some(arity) = pool_and_arity(args[2]) else {
+                continue;
+            };
+            let marginal_stv = if let Some((s, c)) = pool_stv_parts(args[3]) {
+                pool_stv_bytes(s, pln_marginal_proj_confidence(s, c))
+            } else {
+                prem_stv.to_vec()
+            };
+            return Some(PoolProjection {
+                source: args[2].to_vec(),
+                source_stv: args[3].to_vec(),
+                arity,
+                idx: idx.to_vec(),
+                marginal_stv,
+            });
+        }
+    }
+    None
+}
+
+#[derive(Clone)]
+enum PoolPart {
+    Indep {
+        tv: Vec<u8>,
+    },
+    Pool {
+        source: Vec<u8>,
+        source_stv: Vec<u8>,
+        arity: usize,
+        idxs: Vec<Vec<u8>>,
+        marginal_stv: Vec<u8>,
+    },
+}
+
+fn pool_idx_list(idxs: &[Vec<u8>]) -> Vec<u8> {
+    pool_evidence_list(idxs)
+}
+
+fn pool_parse_idx_list(bytes: &[u8]) -> Vec<Vec<u8>> {
+    pool_evidence_items(bytes)
+}
+
+fn pool_part_tv(part: &PoolPart) -> &[u8] {
+    match part {
+        PoolPart::Indep { tv } => tv,
+        PoolPart::Pool {
+            source_stv,
+            arity,
+            idxs,
+            marginal_stv,
+            ..
+        } => {
+            if idxs.len() == *arity {
+                source_stv
+            } else {
+                marginal_stv
+            }
+        }
+    }
+}
+
+fn pool_parts_tv(parts: &[PoolPart]) -> Option<Vec<u8>> {
+    let mut iter = parts.iter();
+    let first = iter.next()?;
+    let mut acc = pool_part_tv(first).to_vec();
+    for part in iter {
+        acc = pool_and_stv(&acc, pool_part_tv(part))?;
+    }
+    Some(acc)
+}
+
+fn pool_parts_bytes(parts: &[PoolPart]) -> Vec<u8> {
+    let mut out = pool_symbol_bytes("pnil");
+    for part in parts.iter().rev() {
+        let mut part_bytes = Vec::new();
+        match part {
+            PoolPart::Indep { tv } => {
+                pool_push_expr(&mut part_bytes, "indep-part", &[tv]);
+            }
+            PoolPart::Pool {
+                source,
+                source_stv,
+                arity,
+                idxs,
+                marginal_stv,
+            } => {
+                let arity_s = pool_symbol_bytes(&arity.to_string());
+                let idxs_b = pool_idx_list(idxs);
+                pool_push_expr(
+                    &mut part_bytes,
+                    "pool-part",
+                    &[source, source_stv, &arity_s, &idxs_b, marginal_stv],
+                );
+            }
+        }
+        let mut next = Vec::new();
+        pool_push_expr(&mut next, "pcons", &[&part_bytes, &out]);
+        out = next;
+    }
+    out
+}
+
+fn pool_parse_parts(bytes: &[u8]) -> Option<Vec<PoolPart>> {
+    if pool_is_symbol(bytes, "pnil") {
+        return Some(Vec::new());
+    }
+    let args = pool_expr_args(bytes);
+    if args.len() != 3 || !pool_is_symbol(args[0], "pcons") {
+        return None;
+    }
+    let head = pool_expr_args(args[1]);
+    let mut rest = pool_parse_parts(args[2])?;
+    let part = if head.len() == 2 && pool_is_symbol(head[0], "indep-part") {
+        PoolPart::Indep {
+            tv: head[1].to_vec(),
+        }
+    } else if head.len() == 6 && pool_is_symbol(head[0], "pool-part") {
+        PoolPart::Pool {
+            source: head[1].to_vec(),
+            source_stv: head[2].to_vec(),
+            arity: pool_symbol_str(head[3])?.parse::<usize>().ok()?,
+            idxs: pool_parse_idx_list(head[4]),
+            marginal_stv: head[5].to_vec(),
+        }
+    } else {
+        return None;
+    };
+    rest.insert(0, part);
+    Some(rest)
+}
+
+fn pool_state_parts_ev(state: &[u8]) -> Option<(Vec<PoolPart>, Vec<u8>)> {
+    if pool_is_symbol(state, "no-stv") {
+        return Some((Vec::new(), pool_symbol_bytes("pnil")));
+    }
+    let args = pool_expr_args(state);
+    if args.len() == 4 && pool_is_symbol(args[0], "and-pool") {
+        Some((pool_parse_parts(args[3])?, args[2].to_vec()))
+    } else {
+        None
+    }
+}
+
+fn pool_state_bytes(tv: &[u8], evset: &[u8], parts: &[PoolPart]) -> Vec<u8> {
+    let parts_b = pool_parts_bytes(parts);
+    let mut state = Vec::new();
+    pool_push_expr(&mut state, "and-pool", &[tv, evset, &parts_b]);
+    let mut out = Vec::new();
+    pool_push_expr(&mut out, "pool-advance", &[&state]);
+    out
+}
+
+fn pool_read_expr_bytes(expr: &mut ExprSource, out: &mut Vec<u8>) -> Result<(), EvalError> {
+    match expr.read() {
+        SourceItem::Tag(Tag::Arity(arity)) => {
+            out.push(item_byte(Tag::Arity(arity)));
+            for _ in 0..arity {
+                pool_read_expr_bytes(expr, out)?;
+            }
+        }
+        SourceItem::Tag(Tag::NewVar) => out.push(item_byte(Tag::NewVar)),
+        SourceItem::Tag(Tag::VarRef(idx)) => out.push(item_byte(Tag::VarRef(idx))),
+        SourceItem::Tag(Tag::SymbolSize(_)) => {
+            return Err(EvalError::from("unexpected symbol-size tag"));
+        }
+        SourceItem::Symbol(symbol) => {
+            out.push(item_byte(Tag::SymbolSize(symbol.len() as u8)));
+            out.extend_from_slice(symbol);
+        }
+    }
+    Ok(())
+}
+
+fn pool_consume_expr_bytes(expr: &mut ExprSource) -> Result<Vec<u8>, EvalError> {
+    let mut out = Vec::new();
+    pool_read_expr_bytes(expr, &mut out)?;
+    Ok(out)
+}
+
+pub extern "C" fn pln_and_pool_acc(
+    expr: *mut ExprSource,
+    sink: *mut ExprSink,
+) -> Result<(), EvalError> {
+    let expr = unsafe { &mut *expr };
+    let sink = unsafe { &mut *sink };
+    let items = expr.consume_head_check(b"pln_and_pool_acc")?;
+    let (state, prem_stv, prem_evset) = if items == 1 {
+        let input = pool_consume_expr_bytes(expr)?;
+        let args = pool_expr_args(&input);
+        if args.len() != 4 || !pool_is_symbol(args[0], "pool-input") {
+            return Err(EvalError::from(
+                "pln_and_pool_acc takes (pool-input state stv evset)",
+            ));
+        }
+        (args[1].to_vec(), args[2].to_vec(), args[3].to_vec())
+    } else if items == 3 {
+        (
+            pool_consume_expr_bytes(expr)?,
+            pool_consume_expr_bytes(expr)?,
+            pool_consume_expr_bytes(expr)?,
+        )
+    } else {
+        return Err(EvalError::from(
+            "pln_and_pool_acc takes one pool-input or three arguments",
+        ));
+    };
+    let state = state.as_slice();
+    let prem_stv = prem_stv.as_slice();
+    let prem_evset = prem_evset.as_slice();
+
+    let Some((mut parts, old_evset)) = pool_state_parts_ev(state) else {
+        sink.extend_from_slice(&pool_symbol_bytes("pool-blocked"))?;
+        return Ok(());
+    };
+    let projection = pool_projection_info(prem_evset, prem_stv);
+    let overlap = pool_evidence_overlaps(&old_evset, prem_evset);
+
+    match projection {
+        Some(proj) => {
+            if let Some(part) = parts.iter_mut().find(
+                |part| matches!(part, PoolPart::Pool { source, .. } if *source == proj.source),
+            ) {
+                if let PoolPart::Pool { idxs, .. } = part {
+                    if !idxs.contains(&proj.idx) {
+                        idxs.push(proj.idx);
+                    }
+                }
+            } else if overlap {
+                sink.extend_from_slice(&pool_symbol_bytes("pool-blocked"))?;
+                return Ok(());
+            } else {
+                parts.push(PoolPart::Pool {
+                    source: proj.source,
+                    source_stv: proj.source_stv,
+                    arity: proj.arity,
+                    idxs: vec![proj.idx],
+                    marginal_stv: proj.marginal_stv,
+                });
+            }
+        }
+        None => {
+            if overlap {
+                sink.extend_from_slice(&pool_symbol_bytes("pool-blocked"))?;
+                return Ok(());
+            }
+            parts.push(PoolPart::Indep {
+                tv: prem_stv.to_vec(),
+            });
+        }
+    }
+
+    let Some(next_tv) = pool_parts_tv(&parts) else {
+        sink.extend_from_slice(&pool_symbol_bytes("pool-blocked"))?;
+        return Ok(());
+    };
+    let next_evset = pool_evidence_union(&old_evset, prem_evset);
+    sink.extend_from_slice(&pool_state_bytes(&next_tv, &next_evset, &parts))?;
+    Ok(())
+}
+
 // PeTTaChainer tv_formulas.metta AndProjection / OrProjection /
 // AndMarginalProjection: extract one element of a compound (And ...) /
 // (Or ...) truth value given the evidence TV of the other elements (sa/ca).
@@ -1065,8 +1513,7 @@ op!(num ternary pln_or_proj_confidence_f64(cab: f64, ca: f64, sa: f64) => {
     if sa == 1.0 { 0.0 } else { cab.min(ca) }
 });
 op!(num binary pln_marginal_proj_confidence_f64(sab: f64, cab: f64) => {
-    let count = sab * pln_confidence_to_count(cab);
-    count / (count + PLN_EVIDENCE_CONFIDENCE_K)
+    pln_marginal_proj_confidence(sab, cab)
 });
 
 op!(num unary f32_as_i8(x: f32) => x as i8);
@@ -1710,6 +2157,7 @@ pub fn register(scope: &mut EvalScope) {
         pln_and_confidence_f64,
         FuncType::Pure,
     );
+    scope.add_func("pln_and_pool_acc", pln_and_pool_acc, FuncType::Pure);
     scope.add_func(
         "pln_negative_branch_strength_f64",
         pln_negative_branch_strength_f64,

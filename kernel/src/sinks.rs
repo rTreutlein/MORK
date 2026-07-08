@@ -806,9 +806,76 @@ fn evidence_union(left: &[u8], right: &[u8]) -> Vec<u8> {
     evidence_list(&set)
 }
 
-fn evidence_overlaps(left: &[u8], right: &[u8]) -> bool {
+fn is_expr_head(bytes: &[u8], name: &str) -> bool {
+    if let Tag::Arity(_) = byte_item(bytes[0]) {
+        let args = expr_args(bytes);
+        !args.is_empty() && is_symbol(args[0], name)
+    } else {
+        false
+    }
+}
+
+fn evidence_dependent(left: &[u8], right: &[u8]) -> bool {
     let left = evidence_set(left);
-    evidence_set(right).iter().any(|item| left.contains(item))
+    evidence_set(right)
+        .iter()
+        .any(|item| left.contains(item) && is_expr_head(item, "rule-ev"))
+}
+
+fn evidence_equal(left: &[u8], right: &[u8]) -> bool {
+    evidence_set(left) == evidence_set(right)
+}
+
+#[derive(Clone)]
+struct ProjectionEvidence {
+    source: Vec<u8>,
+    target: Vec<u8>,
+    marginal: bool,
+}
+
+fn projection_evidence(ev: &[u8]) -> Vec<ProjectionEvidence> {
+    evidence_set(ev)
+        .into_iter()
+        .filter_map(|item| {
+            let args = expr_args(&item);
+            if args.len() != 5 || !is_symbol(args[0], "projection-ev") {
+                return None;
+            }
+            let proj_args = expr_args(args[1]);
+            Some(ProjectionEvidence {
+                source: args[2].to_vec(),
+                target: args[4].to_vec(),
+                marginal: proj_args.len() >= 3 && is_symbol(proj_args[0], "marginal-proj"),
+            })
+        })
+        .collect()
+}
+
+fn related_projection_choice(
+    old_stv: &[u8],
+    old_ev: &[u8],
+    new_stv: &[u8],
+    new_ev: &[u8],
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    let old_projection = projection_evidence(old_ev);
+    let new_projection = projection_evidence(new_ev);
+    for old in &old_projection {
+        for new in &new_projection {
+            if old.source == new.source && old.target == new.target {
+                if old.marginal && !new.marginal {
+                    return Some((old_stv.to_vec(), old_ev.to_vec()));
+                }
+                if new.marginal && !old.marginal {
+                    return Some((new_stv.to_vec(), new_ev.to_vec()));
+                }
+                if stv_parts(new_stv).1 < stv_parts(old_stv).1 {
+                    return Some((new_stv.to_vec(), new_ev.to_vec()));
+                }
+                return Some((old_stv.to_vec(), old_ev.to_vec()));
+            }
+        }
+    }
+    None
 }
 
 fn merge_evidenced_stv(
@@ -817,7 +884,10 @@ fn merge_evidenced_stv(
     new_stv: &[u8],
     new_ev: &[u8],
 ) -> (Vec<u8>, Vec<u8>) {
-    if evidence_overlaps(old_ev, new_ev) {
+    if let Some(choice) = related_projection_choice(old_stv, old_ev, new_stv, new_ev) {
+        return choice;
+    }
+    if evidence_equal(old_ev, new_ev) || evidence_dependent(old_ev, new_ev) {
         if stv_parts(new_stv).1 > stv_parts(old_stv).1 {
             (new_stv.to_vec(), new_ev.to_vec())
         } else {
