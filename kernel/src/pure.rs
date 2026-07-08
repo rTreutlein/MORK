@@ -33,10 +33,10 @@ macro_rules! op {
             let expr = unsafe { &mut *expr };
             let sink = unsafe { &mut *sink };
             let items = expr.consume_head_check(stringify!($name).as_bytes())?;
-            if items != 3 {
+            if items != 4 {
                 return Err(EvalError::from(concat!(
                     stringify!($name),
-                    " takes three arguments"
+                    " takes four arguments"
                 )));
             }
             let $x = expr.consume::<$tx>()?;
@@ -874,6 +874,11 @@ fn pln_marginal_proj_confidence(sab: f64, cab: f64) -> f64 {
     count / (count + PLN_EVIDENCE_CONFIDENCE_K)
 }
 
+fn pln_ideal_prod_confidence(s1: f64, v1: f64, s2: f64, v2: f64, strength: f64) -> f64 {
+    let var = (v1 * v2) + ((v1 * (s2 * s2)) + ((s1 * s1) * v2));
+    pln_ideal_conf_from_var(strength, var)
+}
+
 fn pln_and_confidence(s1: f64, c1: f64, s2: f64, c2: f64) -> f64 {
     if c1 <= 0.0 || c2 <= 0.0 {
         return 0.0;
@@ -881,8 +886,17 @@ fn pln_and_confidence(s1: f64, c1: f64, s2: f64, c2: f64) -> f64 {
     let strength = s1 * s2;
     let v1 = pln_ideal_var(s1, c1);
     let v2 = pln_ideal_var(s2, c2);
-    let var = v1 * v2 + v1 * s2 * s2 + s1 * s1 * v2;
-    pln_ideal_conf_from_var(strength, var)
+    pln_ideal_prod_confidence(s1, v1, s2, v2, strength)
+}
+
+fn pln_or_confidence(s1: f64, c1: f64, s2: f64, c2: f64) -> f64 {
+    if c1 <= 0.0 || c2 <= 0.0 {
+        return 0.0;
+    }
+    let strength = s1 + s2 - (s1 * s2);
+    let v1 = pln_ideal_var(s1, c1);
+    let v2 = pln_ideal_var(s2, c2);
+    pln_ideal_prod_confidence(1.0 - s1, v1, 1.0 - s2, v2, strength)
 }
 
 // PeTTaChainer tv_formulas.metta NegativeBranchStrength.
@@ -907,10 +921,9 @@ fn pln_mp_confidence(as_: f64, ac: f64, bs_a: f64, bc_a: f64, bs_na: f64, bc_na:
     let vna = pln_ideal_var(bs_na, bc_na);
     let vz = pln_ideal_var(as_, ac);
     let s_b = bs_a * as_ + bs_na * (1.0 - as_);
-    let vars_b = (as_ * as_) * va
-        + ((1.0 - as_) * (1.0 - as_)) * vna
-        + ((bs_a - bs_na) * (bs_a - bs_na)) * vz
-        + vz * (va + vna);
+    let vars_b = ((as_ * as_) * va)
+        + ((((1.0 - as_) * (1.0 - as_)) * vna)
+            + ((((bs_a - bs_na) * (bs_a - bs_na)) * vz) + (vz * (va + vna))));
     pln_ideal_conf_from_var(s_b, vars_b)
 }
 
@@ -1055,6 +1068,10 @@ pub extern "C" fn pln_and_confidence_f64(
     ))?;
     Ok(())
 }
+
+op!(num quaternary pln_or_confidence_f64(s1: f64, c1: f64, s2: f64, c2: f64) => {
+    pln_or_confidence(s1, c1, s2, c2)
+});
 
 fn pool_symbol_bytes(s: &str) -> Vec<u8> {
     let mut out = vec![item_byte(Tag::SymbolSize(s.len() as u8))];
@@ -2155,6 +2172,11 @@ pub fn register(scope: &mut EvalScope) {
     scope.add_func(
         "pln_and_confidence_f64",
         pln_and_confidence_f64,
+        FuncType::Pure,
+    );
+    scope.add_func(
+        "pln_or_confidence_f64",
+        pln_or_confidence_f64,
         FuncType::Pure,
     );
     scope.add_func("pln_and_pool_acc", pln_and_pool_acc, FuncType::Pure);

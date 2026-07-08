@@ -1873,7 +1873,7 @@ impl OrStvSink {
     }
 
     fn ideal_prod_confidence(s1: f64, v1: f64, s2: f64, v2: f64, strength: f64) -> f64 {
-        let var = v1 * v2 + v1 * s2 * s2 + s1 * s1 * v2;
+        let var = (v1 * v2) + ((v1 * (s2 * s2)) + ((s1 * s1) * v2));
         Self::ideal_conf_from_var(strength, var)
     }
 
@@ -1904,10 +1904,10 @@ impl OrStvSink {
             let v_pos = Self::ideal_var(pos_s, pos_c);
             let v_neg = Self::ideal_var(neg_s, neg_c);
             let v_premise = Self::ideal_var(premise_s, premise_c);
-            let var = (premise_s * premise_s * v_pos)
-                + ((1.0 - premise_s) * (1.0 - premise_s) * v_neg)
-                + ((pos_s - neg_s) * (pos_s - neg_s) * v_premise)
-                + (v_premise * (v_pos + v_neg));
+            let var = ((premise_s * premise_s) * v_pos)
+                + ((((1.0 - premise_s) * (1.0 - premise_s)) * v_neg)
+                    + ((((pos_s - neg_s) * (pos_s - neg_s)) * v_premise)
+                        + (v_premise * (v_pos + v_neg))));
             Self::ideal_conf_from_var(strength, var)
         };
         stv_bytes(strength, confidence)
