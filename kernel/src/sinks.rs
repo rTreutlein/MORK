@@ -1755,6 +1755,52 @@ pub struct DistAverageSink {
     groups: BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, Vec<(f64, f64)>>>,
 }
 
+fn write_dist_convolution(
+    groups: &BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, Vec<(f64, f64)>>>,
+    average: bool,
+) -> PathMap<()> {
+    let mut add = PathMap::new();
+    for (result_pid, sources) in groups {
+        if sources.is_empty() {
+            continue;
+        }
+
+        let mut sums = vec![(0.0, 1.0)];
+        for pairs in sources.values() {
+            let mut next = Vec::with_capacity(sums.len() * pairs.len());
+            for (sum, mass) in &sums {
+                for (x, w) in pairs {
+                    next.push((sum + x, mass * w));
+                }
+            }
+            sums = next;
+        }
+
+        let divisor = if average { sources.len() as f64 } else { 1.0 };
+        let mut values: BTreeMap<String, f64> = BTreeMap::new();
+        for (sum, mass) in sums {
+            let value = (sum / divisor).to_string();
+            *values.entry(value).or_default() += mass;
+        }
+
+        for (value, mass) in values {
+            if mass == 0.0 {
+                continue;
+            }
+            let value_bytes = symbol_bytes(&value);
+            let mass_bytes = symbol_bytes(&mass.to_string());
+            let mut atom = Vec::new();
+            push_expr(
+                &mut atom,
+                "dist-pair",
+                &[result_pid, &value_bytes[..], &mass_bytes[..]],
+            );
+            add.insert(&atom[..], ());
+        }
+    }
+    add
+}
+
 impl Sink for DistAverageSink {
     fn new(_e: Expr) -> Self {
         DistAverageSink {
@@ -1804,45 +1850,71 @@ impl Sink for DistAverageSink {
         };
         wz.reset();
 
-        let mut add = PathMap::new();
-        for (result_pid, sources) in &self.groups {
-            if sources.is_empty() {
-                continue;
-            }
+        let add = write_dist_convolution(&self.groups, true);
+        self.groups.clear();
 
-            let mut sums = vec![(0.0, 1.0)];
-            for pairs in sources.values() {
-                let mut next = Vec::with_capacity(sums.len() * pairs.len());
-                for (sum, mass) in &sums {
-                    for (x, w) in pairs {
-                        next.push((sum + x, mass * w));
-                    }
-                }
-                sums = next;
-            }
-
-            let count = sources.len() as f64;
-            let mut averaged: BTreeMap<String, f64> = BTreeMap::new();
-            for (sum, mass) in sums {
-                let avg = (sum / count).to_string();
-                *averaged.entry(avg).or_default() += mass;
-            }
-
-            for (avg, mass) in averaged {
-                if mass == 0.0 {
-                    continue;
-                }
-                let avg_bytes = symbol_bytes(&avg);
-                let mass_bytes = symbol_bytes(&mass.to_string());
-                let mut atom = Vec::new();
-                push_expr(
-                    &mut atom,
-                    "dist-pair",
-                    &[result_pid, &avg_bytes[..], &mass_bytes[..]],
-                );
-                add.insert(&atom[..], ());
-            }
+        match wz.join_into(&add.read_zipper()) {
+            AlgebraicStatus::Element => true,
+            AlgebraicStatus::Identity => false,
+            AlgebraicStatus::None => true,
         }
+    }
+}
+
+pub struct DistSumSink {
+    groups: BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, Vec<(f64, f64)>>>,
+}
+
+impl Sink for DistSumSink {
+    fn new(_e: Expr) -> Self {
+        DistSumSink {
+            groups: BTreeMap::new(),
+        }
+    }
+    fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
+        std::iter::once(WriteResourceRequest::BTM([].as_slice()))
+    }
+    fn sink<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+        path: &[u8],
+    ) where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        let mpath = &path[wz.root_prefix_path().len()..];
+        let args = expr_args(mpath);
+        assert_eq!(args.len(), 5, "dist-sum expects 4 payload args");
+        assert_eq!(symbol_str(args[0]), "dist-sum");
+
+        let result_pid = args[1].to_vec();
+        let source = args[2].to_vec();
+        let x = str::parse::<f64>(symbol_str(args[3])).unwrap();
+        let w = str::parse::<f64>(symbol_str(args[4])).unwrap();
+        self.groups
+            .entry(result_pid)
+            .or_default()
+            .entry(source)
+            .or_default()
+            .push((x, w));
+    }
+    fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+    ) -> bool
+    where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        wz.reset();
+
+        let add = write_dist_convolution(&self.groups, false);
         self.groups.clear();
 
         match wz.join_into(&add.read_zipper()) {
@@ -3732,6 +3804,7 @@ pub enum ASink {
     BaseRateSink(BaseRateSink),
     PairCountsSink(PairCountsSink),
     DistAverageSink(DistAverageSink),
+    DistSumSink(DistSumSink),
     OrStvSink(OrStvSink),
     TotalEvidenceMpSink(TotalEvidenceMpSink),
     CountSink(CountSink),
@@ -3832,6 +3905,12 @@ impl Sink for ASink {
                 && &*slice_from_raw_parts(e.ptr.offset(2), 12) == b"dist-average"
         } {
             ASink::DistAverageSink(DistAverageSink::new(e))
+        } else if unsafe {
+            *e.ptr == item_byte(Tag::Arity(5))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(8))
+                && &*slice_from_raw_parts(e.ptr.offset(2), 8) == b"dist-sum"
+        } {
+            ASink::DistSumSink(DistSumSink::new(e))
         } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(8))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(6))
@@ -4025,6 +4104,11 @@ impl Sink for ASink {
                         yield i
                     }
                 }
+                ASink::DistSumSink(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
                 ASink::OrStvSink(s) => {
                     for i in s.request().into_iter() {
                         yield i
@@ -4125,6 +4209,7 @@ impl Sink for ASink {
             ASink::BaseRateSink(s) => s.sink(it, path),
             ASink::PairCountsSink(s) => s.sink(it, path),
             ASink::DistAverageSink(s) => s.sink(it, path),
+            ASink::DistSumSink(s) => s.sink(it, path),
             ASink::OrStvSink(s) => s.sink(it, path),
             ASink::TotalEvidenceMpSink(s) => s.sink(it, path),
             ASink::CountSink(s) => s.sink(it, path),
@@ -4165,6 +4250,7 @@ impl Sink for ASink {
             ASink::BaseRateSink(s) => s.finalize(it),
             ASink::PairCountsSink(s) => s.finalize(it),
             ASink::DistAverageSink(s) => s.finalize(it),
+            ASink::DistSumSink(s) => s.finalize(it),
             ASink::OrStvSink(s) => s.finalize(it),
             ASink::TotalEvidenceMpSink(s) => s.finalize(it),
             ASink::CountSink(s) => s.finalize(it),

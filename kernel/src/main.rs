@@ -2866,6 +2866,34 @@ fn sink_dist_average() {
     assert_eq!(res, "(155 0.5)\n(165 0.5)\n")
 }
 
+fn sink_dist_sum() {
+    let mut s = Space::new();
+
+    const SPACE_EXPRS: &str = r#"
+(exec 0
+    (, (count-source $src $x $w))
+    (O (dist-sum out $src $x $w)))
+
+(count-source a 0.0 0.5)
+(count-source a 1.0 0.5)
+(count-source b 0.0 0.5)
+(count-source b 1.0 0.5)
+    "#;
+
+    s.add_all_sexpr(SPACE_EXPRS.as_bytes()).unwrap();
+    s.metta_calculus(100);
+
+    let mut v = vec![];
+    s.dump_sexpr(
+        expr!(s, "[4] dist-pair out $ $"),
+        expr!(s, "[2] _1 _2"),
+        &mut v,
+    );
+    let res = String::from_utf8_lossy_owned(v);
+
+    assert_eq!(res, "(0 0.25)\n(1 0.5)\n(2 0.25)\n")
+}
+
 fn sink_count() {
     let mut s = Space::new();
 
@@ -6280,6 +6308,7 @@ fn main() {
             sink_float_reduce();
             sink_float_reduce_guarded();
             sink_dist_average();
+            sink_dist_sum();
 
             parse_csv();
             parse_json();
