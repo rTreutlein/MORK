@@ -1084,7 +1084,44 @@ fn evidence_depends_on_fact(
     fact: &[u8],
     proved: &BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
 ) -> bool {
-    expanded_fact_evidence_keys(evset, proved).contains(fact)
+    evidence_set(evset)
+        .into_iter()
+        .filter_map(|item| fact_evidence_key(&item))
+        .any(|key| fact_evidence_key_depends_on(&key, fact, proved, &mut BTreeSet::new()))
+}
+
+fn fact_evidence_key_depends_on(
+    key: &[u8],
+    fact: &[u8],
+    proved: &BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
+    stack: &mut BTreeSet<Vec<u8>>,
+) -> bool {
+    if key == fact {
+        return true;
+    }
+    if !stack.insert(key.to_vec()) {
+        return false;
+    }
+    let depends = proved
+        .get(key)
+        .into_iter()
+        .flat_map(|rows| rows.iter())
+        .filter_map(parse_scheduled_ctv_proof)
+        .any(|proof| evidence_depends_on_fact_with_stack(&proof.evset, fact, proved, stack));
+    stack.remove(key);
+    depends
+}
+
+fn evidence_depends_on_fact_with_stack(
+    evset: &[u8],
+    fact: &[u8],
+    proved: &BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
+    stack: &mut BTreeSet<Vec<u8>>,
+) -> bool {
+    evidence_set(evset)
+        .into_iter()
+        .filter_map(|item| fact_evidence_key(&item))
+        .any(|key| fact_evidence_key_depends_on(&key, fact, proved, stack))
 }
 
 fn residual_evidence(evset: &[u8], shared: &BTreeSet<Vec<u8>>) -> BTreeSet<Vec<u8>> {
@@ -1514,6 +1551,10 @@ fn factor_merge_with_fact_stvs(
     let shared_stv = shared_conjunction_stv(&shared, facts)?;
     let merged = OrStvSink::mp_stv(&shared_stv, &revised_pos?, &revised_neg?);
     Some((merged, union_proof_evidence(&proofs)))
+}
+
+fn all_scheduled_ctv_proof_rows(rows: &BTreeSet<ProofRow>) -> bool {
+    rows.iter().all(|row| parse_scheduled_ctv_proof(row).is_some())
 }
 
 #[derive(Default)]
@@ -2357,9 +2398,13 @@ impl Sink for ReviseProofsSink {
             }
             let factored = if factor_rows.len() >= 2 {
                 factor_merge_all_shared_proofs(&factor_rows).or_else(|| {
-                    let facts = fact_stvs.get_or_insert_with(|| collect_fact_stvs(wz));
-                    let proved = proved_rows.get_or_insert_with(|| collect_proved_rows(wz));
-                    factor_merge_with_fact_stvs(&factor_rows, facts, proved)
+                    if all_scheduled_ctv_proof_rows(&factor_rows) {
+                        let facts = fact_stvs.get_or_insert_with(|| collect_fact_stvs(wz));
+                        let proved = proved_rows.get_or_insert_with(|| collect_proved_rows(wz));
+                        factor_merge_with_fact_stvs(&factor_rows, facts, proved)
+                    } else {
+                        None
+                    }
                 })
             } else {
                 None
