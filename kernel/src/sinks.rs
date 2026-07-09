@@ -1287,12 +1287,26 @@ fn proved_row(path: &[u8]) -> Option<(Vec<u8>, ProofRow)> {
     }
 }
 
+fn expr_prefix(name: &str, arity: u8, args: &[&[u8]]) -> Vec<u8> {
+    let mut prefix = Vec::new();
+    prefix.push(item_byte(Tag::Arity(arity)));
+    prefix.extend_from_slice(&symbol_bytes(name));
+    for arg in args {
+        prefix.extend_from_slice(arg);
+    }
+    prefix
+}
+
 fn collect_fact_stvs<Z>(root: &Z) -> BTreeMap<Vec<u8>, Vec<u8>>
 where
     Z: ZipperForking<()>,
 {
-    let mut facts: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+    let prefix = expr_prefix("fact", 3, &[]);
     let mut rz = root.fork_read_zipper();
+    if rz.descend_to_existing(&prefix) != prefix.len() {
+        return BTreeMap::new();
+    }
+    let mut facts: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
     while rz.to_next_val() {
         if let Some((goal, stv)) = fact_row(rz.origin_path()) {
             match facts.get(&goal) {
@@ -1310,8 +1324,12 @@ fn collect_proved_rows<Z>(root: &Z) -> BTreeMap<Vec<u8>, BTreeSet<ProofRow>>
 where
     Z: ZipperForking<()>,
 {
-    let mut proved: BTreeMap<Vec<u8>, BTreeSet<ProofRow>> = BTreeMap::new();
+    let prefix = expr_prefix("proved", 5, &[]);
     let mut rz = root.fork_read_zipper();
+    if rz.descend_to_existing(&prefix) != prefix.len() {
+        return BTreeMap::new();
+    }
+    let mut proved: BTreeMap<Vec<u8>, BTreeSet<ProofRow>> = BTreeMap::new();
     while rz.to_next_val() {
         if let Some((goal, row)) = proved_row(rz.origin_path()) {
             proved.entry(goal).or_default().insert(row);
