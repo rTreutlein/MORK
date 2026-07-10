@@ -3580,7 +3580,7 @@ impl<Reduction: FloatReduction> Sink for FloatReductionSink<Reduction> {
             struct GuardedFloatGroup {
                 output: Vec<u8>,
                 output_var: Vec<u8>,
-                total: f64,
+                rows: Vec<(Vec<u8>, f64)>,
             }
 
             let mut groups: BTreeMap<Vec<u8>, GuardedFloatGroup> = BTreeMap::new();
@@ -3589,21 +3589,27 @@ impl<Reduction: FloatReduction> Sink for FloatReductionSink<Reduction> {
                 let output = args[1].to_vec();
                 let output_var = args[2].to_vec();
                 let value = str::parse::<f64>(symbol_str(args[3])).unwrap();
+                let order = args[4].to_vec();
                 let mut key = output.clone();
                 key.extend_from_slice(&output_var);
                 let group = groups.entry(key).or_insert_with(|| GuardedFloatGroup {
                     output,
                     output_var,
-                    total: Reduction::ACC,
+                    rows: Vec::new(),
                 });
-                Reduction::op(&mut group.total, value);
+                group.rows.push((order, value));
             }
             self.guarded_unique.clear();
 
             let mut changed = false;
             let mut buffer: Vec<u8> = Vec::with_capacity(1 << 20);
-            for (_key, group) in groups {
-                let total_str = group.total.to_string();
+            for (_key, mut group) in groups {
+                group.rows.sort_by(|left, right| left.0.cmp(&right.0));
+                let mut total = Reduction::ACC;
+                for (_, value) in group.rows {
+                    Reduction::op(&mut total, value);
+                }
+                let total_str = total.to_string();
                 let mut total_bytes = symbol_bytes(&total_str);
 
                 match byte_item(group.output_var[0]) {
