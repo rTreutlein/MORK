@@ -839,6 +839,23 @@ op!(num binary ne_f64(x: f64, y: f64) => (x != y) as i8);
 op!(num from_string f64_from_string<f64>);
 op!(num to_string f64_to_string<f64>);
 
+/// Formats an f64 with `Display`, producing the shortest round-trippable text.
+/// Unlike `f64_to_string`, integral values do not retain a trailing `.0`.
+pub extern "C" fn f64_to_display_string(
+    expr: *mut ExprSource,
+    sink: *mut ExprSink,
+) -> Result<(), EvalError> {
+    let expr = unsafe { &mut *expr };
+    let sink = unsafe { &mut *sink };
+    let items = expr.consume_head_check(b"f64_to_display_string")?;
+    if items != 1 {
+        return Err(EvalError::from("f64_to_display_string takes one argument"));
+    }
+    let text = expr.consume::<f64>()?.to_string();
+    sink.write(SourceItem::Symbol(text.as_bytes()))?;
+    Ok(())
+}
+
 const PLN_EVIDENCE_CONFIDENCE_K: f64 = 800.0;
 
 // PeTTaChainer chainer_utils.metta: (/ (* $conf 800) (- 1 (min-atom ($conf 0.9999))))
@@ -2165,6 +2182,11 @@ pub fn register(scope: &mut EvalScope) {
     );
     scope.add_func("f64_from_string", f64_from_string, FuncType::Pure);
     scope.add_func("f64_to_string", f64_to_string, FuncType::Pure);
+    scope.add_func(
+        "f64_to_display_string",
+        f64_to_display_string,
+        FuncType::Pure,
+    );
     #[cfg(feature = "pln")]
     {
         scope.add_func(
