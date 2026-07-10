@@ -1922,6 +1922,7 @@ impl Sink for OrderedCollectSink {
                         ptr: group.output.as_ptr().cast_mut(),
                     };
                     let mut replacement = list;
+                    buffer.push(item_byte(Tag::NewVar));
                     let mut oz = ExprZipper::new(Expr {
                         ptr: buffer.as_mut_ptr(),
                     });
@@ -3617,6 +3618,7 @@ impl<Reduction: FloatReduction> Sink for FloatReductionSink<Reduction> {
                         let ie = Expr {
                             ptr: group.output.as_ptr().cast_mut(),
                         };
+                        buffer.push(item_byte(Tag::NewVar));
                         let mut oz = ExprZipper::new(Expr {
                             ptr: buffer.as_mut_ptr(),
                         });
