@@ -916,17 +916,6 @@ fn pln_or_confidence(s1: f64, c1: f64, s2: f64, c2: f64) -> f64 {
     pln_ideal_prod_confidence(1.0 - s1, v1, 1.0 - s2, v2, strength)
 }
 
-// PeTTaChainer tv_formulas.metta NegativeBranchStrength.
-fn pln_negative_branch_strength(sa: f64, sb: f64, sb_a: f64) -> f64 {
-    if sa >= 1.0 {
-        sb
-    } else {
-        ((sb - sa * sb_a) / (1.0 - sa)).clamp(0.0, 1.0)
-    }
-}
-
-op!(num ternary pln_negative_branch_strength_f64(sa: f64, sb: f64, sb_a: f64) => pln_negative_branch_strength(sa, sb, sb_a));
-
 // PeTTaChainer tv_formulas.metta ideal-mp-confidence: propagate the exact
 // variance of sB = bs_a*as + bs_na*(1-as) through modus ponens.
 fn pln_mp_confidence(as_: f64, ac: f64, bs_a: f64, bc_a: f64, bs_na: f64, bc_na: f64) -> f64 {
@@ -2200,11 +2189,6 @@ pub fn register(scope: &mut EvalScope) {
             FuncType::Pure,
         );
         scope.add_func("pln_and_pool_acc", pln_and_pool_acc, FuncType::Pure);
-        scope.add_func(
-            "pln_negative_branch_strength_f64",
-            pln_negative_branch_strength_f64,
-            FuncType::Pure,
-        );
         scope.add_func(
             "pln_mp_confidence_f64",
             pln_mp_confidence_f64,
