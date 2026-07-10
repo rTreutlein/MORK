@@ -910,10 +910,6 @@ fn pln_negative_branch_strength(sa: f64, sb: f64, sb_a: f64) -> f64 {
 
 op!(num ternary pln_negative_branch_strength_f64(sa: f64, sb: f64, sb_a: f64) => pln_negative_branch_strength(sa, sb, sb_a));
 
-// PeTTaChainer tv_formulas.metta CTVModusPonensFormula strength:
-// sB = bs_a*as + bs_na*(1-as).
-op!(num ternary pln_mp_strength_f64(premise_s: f64, pos_s: f64, neg_s: f64) => pos_s * premise_s + neg_s * (1.0 - premise_s));
-
 // PeTTaChainer tv_formulas.metta ideal-mp-confidence: propagate the exact
 // variance of sB = bs_a*as + bs_na*(1-as) through modus ponens.
 fn pln_mp_confidence(as_: f64, ac: f64, bs_a: f64, bc_a: f64, bs_na: f64, bc_na: f64) -> f64 {
@@ -2187,7 +2183,6 @@ pub fn register(scope: &mut EvalScope) {
             pln_negative_branch_strength_f64,
             FuncType::Pure,
         );
-        scope.add_func("pln_mp_strength_f64", pln_mp_strength_f64, FuncType::Pure);
         scope.add_func(
             "pln_mp_confidence_f64",
             pln_mp_confidence_f64,
