@@ -2169,64 +2169,67 @@ pub fn register(scope: &mut EvalScope) {
     );
     scope.add_func("f64_from_string", f64_from_string, FuncType::Pure);
     scope.add_func("f64_to_string", f64_to_string, FuncType::Pure);
-    scope.add_func(
-        "pln_and_confidence_f64",
-        pln_and_confidence_f64,
-        FuncType::Pure,
-    );
-    scope.add_func(
-        "pln_or_confidence_f64",
-        pln_or_confidence_f64,
-        FuncType::Pure,
-    );
-    scope.add_func("pln_and_pool_acc", pln_and_pool_acc, FuncType::Pure);
-    scope.add_func(
-        "pln_negative_branch_strength_f64",
-        pln_negative_branch_strength_f64,
-        FuncType::Pure,
-    );
-    scope.add_func("pln_mp_strength_f64", pln_mp_strength_f64, FuncType::Pure);
-    scope.add_func(
-        "pln_mp_confidence_f64",
-        pln_mp_confidence_f64,
-        FuncType::Pure,
-    );
-    scope.add_func("pln_inv_strength_f64", pln_inv_strength_f64, FuncType::Pure);
-    scope.add_func(
-        "pln_inv_confidence_f64",
-        pln_inv_confidence_f64,
-        FuncType::Pure,
-    );
-    scope.add_func(
-        "pln_inversion_valid_f64",
-        pln_inversion_valid_f64,
-        FuncType::Pure,
-    );
-    scope.add_func(
-        "pln_and_proj_strength_f64",
-        pln_and_proj_strength_f64,
-        FuncType::Pure,
-    );
-    scope.add_func(
-        "pln_and_proj_confidence_f64",
-        pln_and_proj_confidence_f64,
-        FuncType::Pure,
-    );
-    scope.add_func(
-        "pln_or_proj_strength_f64",
-        pln_or_proj_strength_f64,
-        FuncType::Pure,
-    );
-    scope.add_func(
-        "pln_or_proj_confidence_f64",
-        pln_or_proj_confidence_f64,
-        FuncType::Pure,
-    );
-    scope.add_func(
-        "pln_marginal_proj_confidence_f64",
-        pln_marginal_proj_confidence_f64,
-        FuncType::Pure,
-    );
+    #[cfg(feature = "pln")]
+    {
+        scope.add_func(
+            "pln_and_confidence_f64",
+            pln_and_confidence_f64,
+            FuncType::Pure,
+        );
+        scope.add_func(
+            "pln_or_confidence_f64",
+            pln_or_confidence_f64,
+            FuncType::Pure,
+        );
+        scope.add_func("pln_and_pool_acc", pln_and_pool_acc, FuncType::Pure);
+        scope.add_func(
+            "pln_negative_branch_strength_f64",
+            pln_negative_branch_strength_f64,
+            FuncType::Pure,
+        );
+        scope.add_func("pln_mp_strength_f64", pln_mp_strength_f64, FuncType::Pure);
+        scope.add_func(
+            "pln_mp_confidence_f64",
+            pln_mp_confidence_f64,
+            FuncType::Pure,
+        );
+        scope.add_func("pln_inv_strength_f64", pln_inv_strength_f64, FuncType::Pure);
+        scope.add_func(
+            "pln_inv_confidence_f64",
+            pln_inv_confidence_f64,
+            FuncType::Pure,
+        );
+        scope.add_func(
+            "pln_inversion_valid_f64",
+            pln_inversion_valid_f64,
+            FuncType::Pure,
+        );
+        scope.add_func(
+            "pln_and_proj_strength_f64",
+            pln_and_proj_strength_f64,
+            FuncType::Pure,
+        );
+        scope.add_func(
+            "pln_and_proj_confidence_f64",
+            pln_and_proj_confidence_f64,
+            FuncType::Pure,
+        );
+        scope.add_func(
+            "pln_or_proj_strength_f64",
+            pln_or_proj_strength_f64,
+            FuncType::Pure,
+        );
+        scope.add_func(
+            "pln_or_proj_confidence_f64",
+            pln_or_proj_confidence_f64,
+            FuncType::Pure,
+        );
+        scope.add_func(
+            "pln_marginal_proj_confidence_f64",
+            pln_marginal_proj_confidence_f64,
+            FuncType::Pure,
+        );
+    }
 
     scope.add_func("f32_as_i8", f32_as_i8, FuncType::Pure);
     scope.add_func("f32_as_i16", f32_as_i16, FuncType::Pure);

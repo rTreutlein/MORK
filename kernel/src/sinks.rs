@@ -3929,7 +3929,7 @@ impl Sink for ASink {
         } else if unsafe { *e.ptr == item_byte(Tag::Arity(3)) && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(4)) &&
             *e.ptr.offset(2) == b't' && *e.ptr.offset(3) == b'a' && *e.ptr.offset(4) == b'i' && *e.ptr.offset(5) == b'l' } {
             ASink::TailSink(HeadTailSink::new(e))
-        } else if unsafe {
+        } else if cfg!(feature = "pln") && unsafe {
             (*e.ptr == item_byte(Tag::Arity(4))
                 || *e.ptr == item_byte(Tag::Arity(5))
                 || *e.ptr == item_byte(Tag::Arity(6))
@@ -3950,37 +3950,37 @@ impl Sink for ASink {
                 && *e.ptr.offset(14) == b's'
         } {
             ASink::ReviseProofsSink(ReviseProofsSink::new(e))
-        } else if unsafe {
+        } else if cfg!(feature = "pln") && unsafe {
             (*e.ptr == item_byte(Tag::Arity(4)) || *e.ptr == item_byte(Tag::Arity(5)))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(14))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 14) == b"fold-base-rate"
         } {
             ASink::BaseRateSink(BaseRateSink::new(e))
-        } else if unsafe {
+        } else if cfg!(feature = "pln") && unsafe {
             *e.ptr == item_byte(Tag::Arity(4))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(11))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 11) == b"pair-counts"
         } {
             ASink::PairCountsSink(PairCountsSink::new(e))
-        } else if unsafe {
+        } else if cfg!(feature = "pln") && unsafe {
             *e.ptr == item_byte(Tag::Arity(5))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(12))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 12) == b"dist-average"
         } {
             ASink::DistAverageSink(DistAverageSink::new(e))
-        } else if unsafe {
+        } else if cfg!(feature = "pln") && unsafe {
             *e.ptr == item_byte(Tag::Arity(5))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(8))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 8) == b"dist-sum"
         } {
             ASink::DistSumSink(DistSumSink::new(e))
-        } else if unsafe {
+        } else if cfg!(feature = "pln") && unsafe {
             *e.ptr == item_byte(Tag::Arity(8))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(6))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 6) == b"or-stv"
         } {
             ASink::OrStvSink(OrStvSink::new(e))
-        } else if unsafe {
+        } else if cfg!(feature = "pln") && unsafe {
             *e.ptr == item_byte(Tag::Arity(11))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(17))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 17) == b"total-evidence-mp"
