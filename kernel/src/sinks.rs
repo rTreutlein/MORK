@@ -1075,8 +1075,17 @@ fn fact_evidence_key(item: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let args = expr_args(item);
-    if args.len() == 2 && is_symbol(args[0], "fact-ev") {
-        Some(args[1].to_vec())
+    if args.len() != 3 || !is_symbol(args[0], "fact-ev") {
+        None
+    } else if matches!(byte_item(args[1][0]), Tag::Arity(_)) {
+        let source = expr_args(args[1]);
+        // Only fact-key evidence expands through proved rows.  A proof-id
+        // source names exact provenance and must remain an atomic item.
+        if source.len() == 2 && is_symbol(source[0], "fact-key") && source[1] == args[2] {
+            Some(args[2].to_vec())
+        } else {
+            None
+        }
     } else {
         None
     }
