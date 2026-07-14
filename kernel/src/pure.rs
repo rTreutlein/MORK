@@ -1137,24 +1137,30 @@ fn pool_stv_parts(stv: &[u8]) -> Option<(f64, f64)> {
     if args.len() != 2 {
         return None;
     }
-    Some((
-        pool_symbol_str(args[0])?.parse::<f64>().ok()?,
-        pool_symbol_str(args[1])?.parse::<f64>().ok()?,
-    ))
+    Some((pool_symbol_f64(args[0])?, pool_symbol_f64(args[1])?))
 }
 
-fn pool_f64_string(value: f64) -> String {
-    let text = value.to_string();
-    if text.contains('.') || text.contains('e') || text.contains('E') {
-        text
-    } else {
-        format!("{text}.0")
+fn pool_symbol_f64(bytes: &[u8]) -> Option<f64> {
+    let Tag::SymbolSize(size) = byte_item(bytes[0]) else { return None };
+    let bytes = &bytes[1..1 + size as usize];
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        if let Ok(value) = text.parse::<f64>() {
+            return value.is_finite().then_some(if value == 0.0 { 0.0 } else { value });
+        }
     }
+    let value = f64::from_be_bytes(bytes.try_into().ok()?);
+    value.is_finite().then_some(if value == 0.0 { 0.0 } else { value })
 }
 
 fn pool_stv_bytes(strength: f64, confidence: f64) -> Vec<u8> {
-    let strength_s = pool_symbol_bytes(&pool_f64_string(strength));
-    let confidence_s = pool_symbol_bytes(&pool_f64_string(confidence));
+    assert!(strength.is_finite(), "strength must be finite");
+    assert!(confidence.is_finite(), "confidence must be finite");
+    let strength = if strength == 0.0 { 0.0 } else { strength };
+    let confidence = if confidence == 0.0 { 0.0 } else { confidence };
+    let mut strength_s = vec![item_byte(Tag::SymbolSize(8))];
+    strength_s.extend_from_slice(&strength.to_be_bytes());
+    let mut confidence_s = vec![item_byte(Tag::SymbolSize(8))];
+    confidence_s.extend_from_slice(&confidence.to_be_bytes());
     let mut out = Vec::new();
     out.push(item_byte(Tag::Arity(2)));
     out.extend_from_slice(&strength_s);

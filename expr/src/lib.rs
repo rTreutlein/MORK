@@ -902,6 +902,14 @@ impl Expr {
         execute_loop(&mut traversal, *self, 0);
     }
 
+    /// Serialize while allowing symbols to be rendered directly into the
+    /// target, including compact non-UTF8 symbols.
+    #[inline(never)]
+    pub fn serialize2_write_symbols<Target: std::io::Write, F: FnMut(&mut Target, &[u8]), G: Fn(u8, bool) -> &'static str>(&self, t: &mut Target, write_symbol: F, map_variable: G) {
+        let mut traversal = SerializerTraversal2WriteSymbols{ out: t, write_symbol, map_variable, transient: false, n: 0 };
+        execute_loop(&mut traversal, *self, 0);
+    }
+
     #[inline(never)]
     pub fn serialize_highlight<Target : std::io::Write, F : for <'a> Fn(&'a [u8]) -> &'a str, G : Fn(u8, bool) -> &'static str>(&self, t: &mut Target, map_symbol: F, map_variable: G, target: usize) -> () {
         let mut targets = [(target, "\x1B[43m", "\x1B[0m")].repeat(10); // FIXE
@@ -1154,6 +1162,17 @@ impl <Target : std::io::Write, F : for <'b> Fn(&'b [u8]) -> &'b str, G : Fn(u8, 
     #[inline(always)] fn zero(&mut self, offset: usize, a: u8) -> () { if self.transient { self.out.write_all(" ".as_bytes()); }; self.out.write_all("(".as_bytes()); self.transient = false; }
     #[inline(always)] fn add(&mut self, offset: usize, acc: (), sub: ()) -> () { self.transient = true; }
     #[inline(always)] fn finalize(&mut self, offset: usize, acc: ()) -> () { self.out.write_all(")".as_bytes()); }
+}
+
+struct SerializerTraversal2WriteSymbols<'a, Target: std::io::Write, F: FnMut(&mut Target, &[u8]), G: Fn(u8, bool) -> &'static str> { out: &'a mut Target, write_symbol: F, map_variable: G, transient: bool, n: u8 }
+#[allow(unused_variables, unused_must_use)]
+impl<Target: std::io::Write, F: FnMut(&mut Target, &[u8]), G: Fn(u8, bool) -> &'static str> Traversal<(), ()> for SerializerTraversal2WriteSymbols<'_, Target, F, G> {
+    #[inline(always)] fn new_var(&mut self, offset: usize) -> () { if self.transient { self.out.write_all(b" "); }; self.out.write_all((self.map_variable)(self.n, true).as_bytes()); self.n += 1; }
+    #[inline(always)] fn var_ref(&mut self, offset: usize, i: u8) -> () { if self.transient { self.out.write_all(b" "); }; self.out.write_all((self.map_variable)(i, false).as_bytes()); }
+    #[inline(always)] fn symbol(&mut self, offset: usize, s: &[u8]) -> () { if self.transient { self.out.write_all(b" "); }; (self.write_symbol)(self.out, s); }
+    #[inline(always)] fn zero(&mut self, offset: usize, a: u8) -> () { if self.transient { self.out.write_all(b" "); }; self.out.write_all(b"("); self.transient = false; }
+    #[inline(always)] fn add(&mut self, offset: usize, acc: (), sub: ()) -> () { self.transient = true; }
+    #[inline(always)] fn finalize(&mut self, offset: usize, acc: ()) -> () { self.out.write_all(b")"); }
 }
 
 struct SerializerTraversalHighlights<'a, 't, Target : std::io::Write, F : for <'b> Fn(&'b [u8]) -> &'b str, G : Fn(u8, bool) -> &'static str> { out: &'a mut Target, map_symbol: F, map_variable: G, transient: bool, n: u8, targets: &'t [(usize, &'static str, &'static str)] }

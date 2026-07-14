@@ -240,7 +240,39 @@ impl_deserializable!(be i64);
 impl_deserializable!(be i128);
 impl_deserializable!(be usize);
 impl_deserializable!(f32 as be u32);
-impl_deserializable!(f64 as be u64);
+impl DeserializableExpr for f64 {
+    #[inline(always)]
+    fn advanced(e: Expr) -> usize {
+        unsafe {
+            let Tag::SymbolSize(size) = byte_item(*e.ptr) else { panic!("wrong symbol for f64") };
+            1 + size as usize
+        }
+    }
+
+    #[inline(always)]
+    fn check(e: Expr) -> bool {
+        unsafe {
+            let Tag::SymbolSize(size) = byte_item(*e.ptr) else { return false };
+            let bytes = slice_from_raw_parts(e.ptr.add(1), size as usize).as_ref().unwrap();
+            if let Ok(text) = str::from_utf8(bytes) {
+                if text.parse::<f64>().is_ok() { return true }
+            }
+            size as usize == core::mem::size_of::<f64>()
+        }
+    }
+
+    #[inline(always)]
+    fn deserialize_unchecked(e: Expr) -> Self {
+        unsafe {
+            let Tag::SymbolSize(size) = byte_item(*e.ptr) else { unreachable!() };
+            let bytes = slice_from_raw_parts(e.ptr.add(1), size as usize).as_ref().unwrap();
+            if let Ok(text) = str::from_utf8(bytes) {
+                if let Ok(value) = text.parse::<f64>() { return value }
+            }
+            f64::from_be_bytes(bytes.try_into().unwrap_unchecked())
+        }
+    }
+}
 
 /// A trait for types that can be serialized into a mork-bytestring expression.
 /// This is used by the `construct!` macro to handle different kinds of inputs.

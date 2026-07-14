@@ -737,15 +737,39 @@ fn is_symbol(bytes: &[u8], name: &str) -> bool {
 fn stv_parts(stv: &[u8]) -> (f64, f64) {
     let args = expr_args(stv);
     assert_eq!(args.len(), 2, "stv must have strength and confidence");
-    (
-        symbol_str(args[0]).parse::<f64>().expect("strength f64"),
-        symbol_str(args[1]).parse::<f64>().expect("confidence f64"),
-    )
+    (stv_f64(args[0], "strength"), stv_f64(args[1], "confidence"))
+}
+
+fn stv_f64(symbol: &[u8], field: &str) -> f64 {
+    try_f64_symbol(symbol).unwrap_or_else(|| panic!("{field} must be textual or binary f64"))
+}
+
+fn try_f64_symbol(symbol: &[u8]) -> Option<f64> {
+    let Tag::SymbolSize(size) = byte_item(symbol[0]) else { return None };
+    try_f64_bytes(&symbol[1..1 + size as usize])
+}
+
+fn try_f64_bytes(bytes: &[u8]) -> Option<f64> {
+    if let Ok(text) = str::from_utf8(bytes) {
+        if let Ok(value) = text.parse::<f64>() {
+            return value.is_finite().then_some(if value == 0.0 { 0.0 } else { value });
+        }
+    }
+    let value = f64::from_be_bytes(bytes.try_into().ok()?);
+    value.is_finite().then_some(if value == 0.0 { 0.0 } else { value })
+}
+
+fn binary_f64_bytes(value: f64, field: &str) -> Vec<u8> {
+    assert!(value.is_finite(), "{field} must be finite");
+    let value = if value == 0.0 { 0.0 } else { value };
+    let mut out = vec![item_byte(Tag::SymbolSize(8))];
+    out.extend_from_slice(&value.to_be_bytes());
+    out
 }
 
 fn stv_bytes(strength: f64, confidence: f64) -> Vec<u8> {
-    let strength_s = symbol_bytes(&strength.to_string());
-    let confidence_s = symbol_bytes(&confidence.to_string());
+    let strength_s = binary_f64_bytes(strength, "strength");
+    let confidence_s = binary_f64_bytes(confidence, "confidence");
     let mut out = Vec::new();
     out.push(item_byte(Tag::Arity(2)));
     out.extend_from_slice(&strength_s);
@@ -890,6 +914,34 @@ fn evidence_equal(left: &[u8], right: &[u8]) -> bool {
 
 fn is_inversion_snapshot_proof(proof_id: &[u8]) -> bool {
     is_expr_head(proof_id, "scheduledInvN")
+}
+
+fn select_current_snapshot_proofs(rows: &BTreeSet<ProofRow>) -> BTreeSet<ProofRow> {
+    let mut selected = BTreeMap::<(Vec<u8>, Vec<u8>), ProofRow>::new();
+    let mut out = BTreeSet::new();
+    for row in rows {
+        if !is_inversion_snapshot_proof(&row.1) {
+            out.insert(row.clone());
+            continue;
+        }
+        let key = (row.1.clone(), row.2.clone());
+        selected
+            .entry(key)
+            .and_modify(|current| {
+                let (strength, confidence) = stv_parts(&row.0);
+                let (current_strength, current_confidence) = stv_parts(&current.0);
+                if confidence
+                    .total_cmp(&current_confidence)
+                    .then_with(|| strength.total_cmp(&current_strength))
+                    .is_gt()
+                {
+                    *current = row.clone();
+                }
+            })
+            .or_insert_with(|| row.clone());
+    }
+    out.extend(selected.into_values());
+    out
 }
 
 #[derive(Clone)]
@@ -1288,9 +1340,7 @@ fn packed_stv(bytes: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let args = expr_args(bytes);
-    if args.iter().all(|arg| {
-        matches!(byte_item(arg[0]), Tag::SymbolSize(_)) && symbol_str(arg).parse::<f64>().is_ok()
-    }) {
+    if args.iter().all(|arg| try_f64_symbol(arg).is_some()) {
         Some(bytes.to_vec())
     } else {
         None
@@ -1559,8 +1609,7 @@ fn all_scheduled_ctv_proof_rows(rows: &BTreeSet<ProofRow>) -> bool {
 
 #[derive(Default)]
 struct BaseRateGroup {
-    old: Vec<u8>,
-    fact_stvs: Vec<(f64, f64)>,
+    fact_stvs_by_old: BTreeMap<Vec<u8>, Vec<(f64, f64)>>,
 }
 
 /// Maintains `(base-rate $patQ $stv)` facts from `(fold-base-rate $patQ $old $stv)`
@@ -1613,9 +1662,13 @@ impl Sink for BaseRateSink {
             }
         }
 
-        let group = self.groups.entry(args[1].to_vec()).or_default();
-        group.old = args[2].to_vec();
-        group.fact_stvs.push(stv_parts(args[3]));
+        self.groups
+            .entry(args[1].to_vec())
+            .or_default()
+            .fact_stvs_by_old
+            .entry(args[2].to_vec())
+            .or_default()
+            .push(stv_parts(args[3]));
     }
     fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
         &mut self,
@@ -1633,9 +1686,22 @@ impl Sink for BaseRateSink {
         let mut add = PathMap::new();
 
         for (pattern, group) in &self.groups {
+            // Several rounds can leave fold rows based on different snapshots.
+            // Evaluate only the most authoritative snapshot; mixing their rows
+            // double-counts the same facts and can let a stale computed value
+            // overwrite a higher-confidence manual value.
+            let Some((old, fact_stvs)) = group.fact_stvs_by_old.iter().max_by(
+                |(left, _), (right, _)| {
+                    let (_, left_c) = stv_parts(left);
+                    let (_, right_c) = stv_parts(right);
+                    left_c.total_cmp(&right_c).then_with(|| left.cmp(right))
+                },
+            ) else {
+                continue;
+            };
             let mut wsum = 0.0;
             let mut csum = 0.0;
-            for (s, c) in &group.fact_stvs {
+            for (s, c) in fact_stvs {
                 wsum += s * c;
                 csum += c;
             }
@@ -1644,16 +1710,16 @@ impl Sink for BaseRateSink {
             } else {
                 stv_bytes(wsum / csum, csum / (csum + 800.0))
             };
-            if new == group.old {
+            if new == *old {
                 continue;
             }
-            let (_, old_c) = stv_parts(&group.old[..]);
+            let (_, old_c) = stv_parts(old);
             let (_, new_c) = stv_parts(&new[..]);
             if new_c < old_c {
                 continue;
             }
             let mut old_fact = Vec::new();
-            push_expr(&mut old_fact, "base-rate", &[pattern, &group.old[..]]);
+            push_expr(&mut old_fact, "base-rate", &[pattern, old]);
             remove.insert(&old_fact[..], ());
             let mut new_fact = Vec::new();
             push_expr(&mut new_fact, "base-rate", &[pattern, &new[..]]);
@@ -2160,8 +2226,8 @@ impl Sink for DistAverageSink {
 
         let result_pid = args[1].to_vec();
         let source = args[2].to_vec();
-        let x = str::parse::<f64>(symbol_str(args[3])).unwrap();
-        let w = str::parse::<f64>(symbol_str(args[4])).unwrap();
+        let x = stv_f64(args[3], "distribution value");
+        let w = stv_f64(args[4], "distribution weight");
         self.groups
             .entry(result_pid)
             .or_default()
@@ -2224,8 +2290,8 @@ impl Sink for DistSumSink {
 
         let result_pid = args[1].to_vec();
         let source = args[2].to_vec();
-        let x = str::parse::<f64>(symbol_str(args[3])).unwrap();
-        let w = str::parse::<f64>(symbol_str(args[4])).unwrap();
+        let x = stv_f64(args[3], "distribution value");
+        let w = stv_f64(args[4], "distribution weight");
         self.groups
             .entry(result_pid)
             .or_default()
@@ -2656,9 +2722,10 @@ impl Sink for ReviseProofsSink {
         let mut proved_rows = None;
 
         for (goal, group) in &self.groups {
+            let current_proofs = select_current_snapshot_proofs(&group.proofs);
             let mut factor_rows = BTreeSet::new();
             if group.old_facts.is_empty() {
-                factor_rows.extend(group.proofs.iter().cloned());
+                factor_rows.extend(current_proofs.iter().cloned());
             } else {
                 factor_rows.extend(group.existing_proofs.iter().cloned());
                 let proved = proved_rows.get_or_insert_with(|| collect_proved_rows(wz));
@@ -2666,7 +2733,7 @@ impl Sink for ReviseProofsSink {
                     factor_rows.extend(rows.iter().cloned());
                 }
                 if !factor_rows.is_empty() {
-                    factor_rows.extend(group.proofs.iter().cloned());
+                    factor_rows.extend(current_proofs.iter().cloned());
                 }
             }
             let factored = if factor_rows.len() >= 2 {
@@ -2698,10 +2765,42 @@ impl Sink for ReviseProofsSink {
                 );
                 remove.insert(&fact_evidence[..], ());
             }
-            for (stv, proof_id, evset) in &group.proofs {
+            let existing_goal_proofs = if group
+                .proofs
+                .iter()
+                .any(|(_, proof_id, _)| is_inversion_snapshot_proof(proof_id))
+            {
+                proved_rows
+                    .get_or_insert_with(|| collect_proved_rows(wz))
+                    .get(goal)
+                    .cloned()
+            } else {
+                None
+            };
+            for (stv, proof_id, evset) in &current_proofs {
                 let mut open_proof = Vec::new();
                 push_expr(&mut open_proof, "open-proof", &[goal, stv, proof_id, evset]);
                 remove.insert(&open_proof[..], ());
+
+                // scheduledInvN identifies a logical proof independently of the
+                // base-rate snapshot used to calculate its TV.  A refreshed
+                // snapshot therefore replaces the prior proved row instead of
+                // accumulating another version of the same proof.
+                if is_inversion_snapshot_proof(proof_id) {
+                    if let Some(rows) = &existing_goal_proofs {
+                        for (old_stv, old_proof_id, old_evset) in rows {
+                            if old_proof_id == proof_id && evidence_equal(old_evset, evset) {
+                                let mut old_proved = Vec::new();
+                                push_expr(
+                                    &mut old_proved,
+                                    "proved",
+                                    &[goal, old_stv, old_proof_id, old_evset],
+                                );
+                                remove.insert(&old_proved[..], ());
+                            }
+                        }
+                    }
+                }
 
                 let mut proved = Vec::new();
                 push_expr(&mut proved, "proved", &[goal, stv, proof_id, evset]);
@@ -3719,7 +3818,7 @@ impl<Reduction: FloatReduction> Sink for FloatReductionSink<Reduction> {
                 let args = expr_args(row);
                 let output = args[1].to_vec();
                 let output_var = args[2].to_vec();
-                let value = str::parse::<f64>(symbol_str(args[3])).unwrap();
+                let value = stv_f64(args[3], "reduction value");
                 let order = args[4].to_vec();
                 let mut key = output.clone();
                 key.extend_from_slice(&output_var);
@@ -3820,7 +3919,7 @@ impl<Reduction: FloatReduction> Sink for FloatReductionSink<Reduction> {
                             trace!(target: "sink", "path number {:?}", serialize(&p[clen..]));
                             Reduction::op(
                                 &mut total,
-                                str::parse::<f64>(str::from_utf8(&p[clen + 1..]).unwrap()).unwrap(),
+                                try_f64_bytes(&p[clen + 1..]).expect("reduction value f64"),
                             );
                         }
                         let min_str = total.to_string();
@@ -3866,7 +3965,7 @@ impl<Reduction: FloatReduction> Sink for FloatReductionSink<Reduction> {
                             trace!(target: "sink", "path {:?}", serialize(&p[clen+1..]));
                             Reduction::op(
                                 &mut total,
-                                str::parse::<f64>(str::from_utf8(&p[clen + 1..]).unwrap()).unwrap(),
+                                try_f64_bytes(&p[clen + 1..]).expect("reduction value f64"),
                             );
                         }
                         let min_str = total.to_string();

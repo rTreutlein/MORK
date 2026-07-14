@@ -32,6 +32,26 @@ pub static mut transitions: usize = 0;
 pub static mut unifications: usize = 0;
 pub static mut writes: usize = 0;
 
+#[cfg(not(feature = "interning"))]
+fn write_printable_symbol<W: Write>(out: &mut W, symbol: &[u8]) {
+    let textual = std::str::from_utf8(symbol).is_ok()
+        && (symbol.iter().all(|byte| !byte.is_ascii_control())
+            || (symbol.first() == Some(&b'"') && symbol.last() == Some(&b'"')));
+    if textual {
+        let _ = out.write_all(symbol);
+    } else if let Ok(raw) = <&[u8; 8]>::try_from(symbol) {
+        let value = f64::from_be_bytes(*raw);
+        if value.is_finite() {
+            let value = if value == 0.0 { 0.0 } else { value };
+            let _ = write!(out, "{value:?}");
+            return;
+        }
+        for byte in symbol { let _ = write!(out, "\\x{byte:02x}"); }
+    } else {
+        for byte in symbol { let _ = write!(out, "\\x{byte:02x}"); }
+    }
+}
+
 pub static ACT_PATH: &'static str = "/dev/shm/";
 // pub static ACT_PATH: &'static str = "/mnt/data/";
 
@@ -900,17 +920,22 @@ impl Space {
         let mut i = 0usize;
         while rz.to_next_val() {
             // println!("{}", serialize(rz.path()));
-            Expr{ ptr: rz.path().as_ptr().cast_mut() }.serialize2(w, |s| {
-                #[cfg(feature="interning")]
-                {
+            let expr = Expr { ptr: rz.path().as_ptr().cast_mut() };
+            #[cfg(feature = "interning")]
+            expr
+            .serialize2(
+                w,
+                |s| {
                     let symbol = i64::from_be_bytes(s.try_into().unwrap()).to_be_bytes();
                     let mstr = self.sm.get_bytes(symbol).map(unsafe { |x| std::str::from_utf8_unchecked(x) });
-                    // println!("symbol {symbol:?}, bytes {mstr:?}");
-                    unsafe { std::mem::transmute(mstr.expect(format!("failed to look up {:?}", symbol).as_str())) }
-                }
-                #[cfg(not(feature="interning"))]
-                unsafe { std::mem::transmute(std::str::from_utf8_unchecked(s)) }
-            }, |i, intro| { Expr::VARNAMES[i as usize] });
+                    unsafe {
+                        std::mem::transmute(mstr.expect(format!("failed to look up {:?}", symbol).as_str()))
+                    }
+                },
+                |i, intro| Expr::VARNAMES[i as usize],
+            );
+            #[cfg(not(feature = "interning"))]
+            expr.serialize2_write_symbols(w, write_printable_symbol, |i, intro| Expr::VARNAMES[i as usize]);
             // w.write(serialize(rz.path()).as_bytes());
             w.write(&[b'\n']).map_err(|x| x.to_string())?;
             i += 1;
@@ -949,17 +974,21 @@ impl Space {
             }
 
             // &buffer[constant_template_prefix.len()..oz.loc]
-            Expr{ ptr: buffer.as_ptr().cast_mut() }.serialize2(w, |s| {
-                #[cfg(feature="interning")]
-                {
+            let expr = Expr { ptr: buffer.as_ptr().cast_mut() };
+            #[cfg(feature = "interning")]
+            expr.serialize2(
+                w,
+                |s| {
                     let symbol = i64::from_be_bytes(s.try_into().unwrap()).to_be_bytes();
                     let mstr = self.sm.get_bytes(symbol).map(unsafe { |x| std::str::from_utf8_unchecked(x) });
-                    // println!("symbol {symbol:?}, bytes {mstr:?}");
-                    unsafe { std::mem::transmute(mstr.expect(format!("failed to look up {:?}", symbol).as_str())) }
-                }
-                #[cfg(not(feature="interning"))]
-                unsafe { std::mem::transmute(std::str::from_utf8_unchecked(s)) }
-            }, |i, intro| { Expr::VARNAMES[i as usize] });
+                    unsafe {
+                        std::mem::transmute(mstr.expect(format!("failed to look up {:?}", symbol).as_str()))
+                    }
+                },
+                |i, intro| Expr::VARNAMES[i as usize],
+            );
+            #[cfg(not(feature = "interning"))]
+            expr.serialize2_write_symbols(w, write_printable_symbol, |i, intro| Expr::VARNAMES[i as usize]);
             let mut buffer_slice = &mut buffer[..];
             w.write(&[b'\n']).map_err(|x| x.to_string()).unwrap();
 
