@@ -1,0 +1,13 @@
+{
+  "image": "mork-dev:nightly-2026-07-15",
+  "build": {
+    "context": ".",
+    "dockerfile": ".myclaw/Dockerfile"
+  },
+  "test": ["cargo", "test"],
+  "caches": [
+    {"name": "cargo-registry", "target": "/usr/local/cargo/registry"},
+    {"name": "cargo-git", "target": "/usr/local/cargo/git"},
+    {"name": "cargo-target", "target": "/var/cache/mork/target"}
+  ]
+}

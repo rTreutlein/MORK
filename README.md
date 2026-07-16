@@ -14,3 +14,24 @@ By rearchitecting certain Hyperon bottlenecks, MORK has the potential to acceler
 If you're looking for the MORK server, use the [server branch](https://github.com/trueagi-io/MORK/tree/server).
 
 If you're looking for the MORK command line utility, run `cargo build --release` in `/kernel`; you'll need a nightly compiler `rustup toolchain install nightly`.
+
+## MyClaw development environment
+
+The project environment pins Rust to `nightly-2026-07-15` and includes the
+native tools needed by the Cargo dependency graph. From an approved MORK task
+worktree, build the image and run the default test with:
+
+```bash
+python /app/project_env.py --task TASK_ID
+```
+
+The default command is `cargo test`. Because the workspace's default member is
+`kernel`, this provides a practical check of the main MORK package and its
+dependency graph. Pass a command after `--` when a broader or more targeted
+check is needed.
+
+MORK's Cargo workspace depends on `../PathMap`. MyClaw must therefore register
+`/nexus/Dev/OpenCog/PathMap` as a project and register MORK as depending on
+PathMap. The environment runner will then mount PathMap read-only at that
+canonical path, preserving Cargo's sibling path resolution. Merely having the
+directory on the host is not sufficient for task containers.
