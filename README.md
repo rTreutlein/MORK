@@ -25,10 +25,10 @@ worktree, build the image and run the default test with:
 python /app/project_env.py --task TASK_ID
 ```
 
-The default command is `cargo test`. Because the workspace's default member is
-`kernel`, this provides a practical check of the main MORK package and its
-dependency graph. Pass a command after `--` when a broader or more targeted
-check is needed.
+The default command is `cargo test --locked`. Because the workspace's default
+member is `kernel`, this provides a practical check of the main MORK package
+and its dependency graph without changing the committed dependency resolution.
+Pass a command after `--` when a broader or more targeted check is needed.
 
 MORK's Cargo workspace depends on `../PathMap`. MyClaw must therefore register
 `/nexus/Dev/OpenCog/PathMap` as a project and register MORK as depending on
