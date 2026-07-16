@@ -17,18 +17,21 @@ If you're looking for the MORK command line utility, run `cargo build --release`
 
 ## MyClaw development environment
 
-The project environment pins Rust to `nightly-2026-07-15` and includes the
-native tools needed by the Cargo dependency graph. From an approved MORK task
-worktree, build the image and run the default test with:
+The project environment pins the OS build environment and Rust to
+`nightly-2026-07-15`, and includes the native tools needed by the Cargo
+dependency graph. From an approved MORK task worktree, build the image and run
+the default test with:
 
 ```bash
 python /app/project_env.py --task TASK_ID
 ```
 
-The default command is `cargo test --locked`. Because the workspace's default
-member is `kernel`, this provides a practical check of the main MORK package
-and its dependency graph without changing the committed dependency resolution.
-Pass a command after `--` when a broader or more targeted check is needed.
+The default command is `cargo test`. Because the workspace's default member is
+`kernel`, this provides a practical check of the main MORK package and its
+dependency graph. MORK explicitly ignores `Cargo.lock`, so Cargo resolution
+follows that existing project policy rather than being pinned by this
+environment declaration. Pass a command after `--` when a broader or more
+targeted check is needed.
 
 MORK's Cargo workspace depends on `../PathMap`. MyClaw must therefore register
 `/nexus/Dev/OpenCog/PathMap` as a project and register MORK as depending on

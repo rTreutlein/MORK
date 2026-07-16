@@ -4,7 +4,7 @@
     "context": ".",
     "dockerfile": ".myclaw/Dockerfile"
   },
-  "test": ["cargo", "test", "--locked"],
+  "test": ["cargo", "test"],
   "caches": [
     {"name": "cargo-registry", "target": "/usr/local/cargo/registry"},
     {"name": "cargo-git", "target": "/usr/local/cargo/git"},
