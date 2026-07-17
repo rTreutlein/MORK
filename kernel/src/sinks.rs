@@ -865,11 +865,46 @@ fn alpha_equiv(left: &[u8], right: &[u8]) -> bool {
     alpha_equiv_inner(left, right, &mut BTreeMap::new(), &mut BTreeMap::new())
 }
 
-fn evidence_contains_rule(evidence: &[u8], rule: &[u8]) -> bool {
+fn pattern_instance_inner(
+    pattern: &[u8],
+    value: &[u8],
+    bindings: &mut BTreeMap<Vec<u8>, Vec<u8>>,
+) -> bool {
+    if is_variable_expr(pattern) {
+        return match bindings.get(pattern) {
+            Some(bound) => bound == value,
+            None => {
+                bindings.insert(pattern.to_vec(), value.to_vec());
+                true
+            }
+        };
+    }
+    match (byte_item(pattern[0]), byte_item(value[0])) {
+        (Tag::Arity(pattern_arity), Tag::Arity(value_arity))
+            if pattern_arity == value_arity =>
+        {
+            expr_args(pattern)
+                .iter()
+                .zip(expr_args(value).iter())
+                .all(|(p, v)| pattern_instance_inner(p, v, bindings))
+        }
+        (Tag::SymbolSize(_), Tag::SymbolSize(_)) => pattern == value,
+        _ => false,
+    }
+}
+
+fn pattern_instance(pattern: &[u8], value: &[u8]) -> bool {
+    pattern_instance_inner(pattern, value, &mut BTreeMap::new())
+}
+
+fn evidence_contains_rule(evidence: &[u8], rule: &[u8], allow_instance: bool) -> bool {
     evidence_set(evidence).iter().any(|item| {
         if let Tag::Arity(_) = byte_item(item[0]) {
             let args = expr_args(item);
-            args.len() == 2 && is_symbol(args[0], "rule-ev") && alpha_equiv(args[1], rule)
+            args.len() == 2
+                && is_symbol(args[0], "rule-ev")
+                && (alpha_equiv(args[1], rule)
+                    || (allow_instance && pattern_instance(rule, args[1])))
         } else {
             false
         }
@@ -1723,8 +1758,10 @@ struct BaseRateGroup {
 /// Maintains `(base-rate $patQ $stv)` facts from `(fold-base-rate $patQ $old $stv)`
 /// rows. `$patQ` is an uninstantiated pattern copy that keys the group, `$old` is
 /// the current value, and each row's `$stv` is one matching fact's truth value.
-/// Guarded rows use
-/// `(fold-base-rate $patQ $old $stv (without-rule $rule $proof $evset))`.
+/// Guarded rows use `(fold-base-rate $patQ $old $stv $guard)`, where the guard
+/// payload is `(base-rate-guard $kind $rule $proof $evset)`.
+/// Application-local folds use `without-rule-instance`, which also recognizes
+/// grounded instances of a schematic rule ID.
 /// They skip recursive evidence and supersede alpha-equivalent proof snapshots.
 /// The weighted base rate follows PeTTaChainer's BaseRateAcc/BaseRateTv:
 /// strength = sum(s*c)/sum(c), confidence = count-confidence(sum(c)).
@@ -1763,13 +1800,18 @@ impl Sink for BaseRateSink {
         assert_eq!(symbol_str(args[0]), "fold-base-rate");
         if args.len() == 5 {
             let guard = expr_args(args[4]);
-            assert_eq!(
-                guard.len(),
-                4,
-                "without-rule expects rule, proof, and evidence"
+            assert_eq!(guard.len(), 5, "base-rate-guard expects four arguments");
+            assert_eq!(symbol_str(guard[0]), "base-rate-guard");
+            let guard_kind = symbol_str(guard[1]);
+            assert!(
+                guard_kind == "without-rule" || guard_kind == "without-rule-instance",
+                "unsupported base-rate recursion guard"
             );
-            assert_eq!(symbol_str(guard[0]), "without-rule");
-            if evidence_contains_rule(guard[3], guard[1]) {
+            if evidence_contains_rule(
+                guard[4],
+                guard[2],
+                guard_kind == "without-rule-instance",
+            ) {
                 self.skipped_rows = true;
                 return;
             }
@@ -1779,7 +1821,7 @@ impl Sink for BaseRateSink {
                 .guarded_proofs_by_old
                 .entry(args[2].to_vec())
                 .or_default()
-                .insert((args[3].to_vec(), guard[2].to_vec(), guard[3].to_vec()));
+                .insert((args[3].to_vec(), guard[3].to_vec(), guard[4].to_vec()));
             return;
         }
 
@@ -1916,12 +1958,13 @@ fn inheritance_subject(goal: &[u8]) -> Option<&[u8]> {
     (inheritance.len() == 3 && is_symbol(inheritance[0], "Inheritance")).then_some(inheritance[1])
 }
 
-fn prior_candidate_goal<'a>(wrapped: &'a [u8], proof: &[u8]) -> Option<&'a [u8]> {
+fn prior_candidate_goal<'a>(wrapped: &'a [u8], proof: &[u8]) -> Option<(&'a [u8], bool)> {
     if is_symbol(proof, "no-prior-proof") {
         return None;
     }
     let args = expr_args(wrapped);
-    (args.len() == 3 && is_symbol(args[0], "prior-candidate")).then_some(args[2])
+    (args.len() == 4 && is_symbol(args[0], "prior-candidate"))
+        .then_some((args[2], is_symbol(args[3], "forward-observed")))
 }
 
 fn prior_candidate_allowed(proof: &[u8]) -> bool {
@@ -2058,6 +2101,29 @@ impl Sink for PriorRuleStvSink {
         let Some(subject) = inheritance_subject(&key.goal) else {
             return;
         };
+        let mut is_forward_observed = |goal: &[u8], proof: &[u8]| {
+            let mode = symbol_bytes("forward-observed");
+            let mut marker = Vec::new();
+            push_expr(
+                &mut marker,
+                "forward-prior-observation",
+                &[goal, proof, &mode],
+            );
+            wz.reset();
+            wz.move_to_path(&marker);
+            let exists = wz.path_exists();
+            wz.reset();
+            exists
+        };
+        let antecedent_candidate = prior_candidate_goal(args[13], args[15]);
+        let antecedent_forward = antecedent_candidate
+            .map(|(goal, mode)| mode || is_forward_observed(goal, args[15]))
+            .unwrap_or(false);
+        let consequent_candidate = prior_candidate_goal(args[17], args[19]);
+        let consequent_forward = consequent_candidate
+            .map(|(goal, mode)| mode || is_forward_observed(goal, args[19]))
+            .unwrap_or(false);
+        drop(is_forward_observed);
         let group = self.groups.entry(key.clone()).or_default();
 
         let add_candidate =
@@ -2066,10 +2132,12 @@ impl Sink for PriorRuleStvSink {
              proof: &[u8],
              evset: &[u8],
              exclude_current_subject: bool,
+             forward_observed: bool,
              target: &mut BTreeMap<Vec<u8>, BTreeSet<ProofRow>>| {
-                if (exclude_current_subject && inheritance_subject(goal) == Some(subject))
-                    || !prior_candidate_allowed(proof)
-                    || evidence_dependent(&key.evset, evset)
+                if !forward_observed
+                    && ((exclude_current_subject && inheritance_subject(goal) == Some(subject))
+                        || !prior_candidate_allowed(proof)
+                        || evidence_dependent(&key.evset, evset))
                 {
                     return;
                 }
@@ -2079,23 +2147,25 @@ impl Sink for PriorRuleStvSink {
                     evset.to_vec(),
                 ));
             };
-        if let Some(goal) = prior_candidate_goal(args[13], args[15]) {
+        if let Some((goal, _mode)) = antecedent_candidate {
             add_candidate(
                 goal,
                 args[14],
                 args[15],
                 args[16],
                 false,
+                antecedent_forward,
                 &mut group.antecedent_rows,
             );
         }
-        if let Some(goal) = prior_candidate_goal(args[17], args[19]) {
+        if let Some((goal, _mode)) = consequent_candidate {
             add_candidate(
                 goal,
                 args[18],
                 args[19],
                 args[20],
                 true,
+                consequent_forward,
                 &mut group.consequent_rows,
             );
         }
