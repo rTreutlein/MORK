@@ -912,36 +912,131 @@ fn evidence_equal(left: &[u8], right: &[u8]) -> bool {
     evidence_set(left) == evidence_set(right)
 }
 
+fn evidence_alpha_equal(left: &[u8], right: &[u8]) -> bool {
+    let left = evidence_set(left);
+    let right = evidence_set(right);
+    left.len() == right.len()
+        && left
+            .iter()
+            .all(|item| right.iter().any(|candidate| alpha_equiv(item, candidate)))
+}
+
+fn inversion_proof_parts(proof_id: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
+    if !matches!(byte_item(proof_id[0]), Tag::Arity(_)) {
+        return None;
+    }
+    let args = expr_args(proof_id);
+    if args.len() != 4 {
+        return None;
+    }
+    if is_symbol(args[0], "scheduledInvN") {
+        return Some((args[1], args[2], args[3]));
+    }
+    if is_symbol(args[0], "scheduledN") {
+        let rule = expr_args(args[2]);
+        if rule.len() == 3 && is_symbol(rule[0], "inv") {
+            return Some((args[1], rule[1], args[3]));
+        }
+    }
+    None
+}
+
+fn is_scoped_inheritance_goal(goal: &[u8]) -> bool {
+    if !matches!(byte_item(goal[0]), Tag::Arity(_)) {
+        return false;
+    }
+    let scoped = expr_args(goal);
+    scoped.len() == 2 && is_expr_head(scoped[1], "Inheritance")
+}
+
+fn is_inheritance_cycle_proof(proof_id: &[u8]) -> bool {
+    if !matches!(byte_item(proof_id[0]), Tag::Arity(_)) {
+        return false;
+    }
+    let args = expr_args(proof_id);
+    if args.is_empty() {
+        return false;
+    }
+    if is_symbol(args[0], "scheduledInvN") && args.len() >= 2 {
+        return is_scoped_inheritance_goal(args[1]);
+    }
+    if is_symbol(args[0], "scheduledN") && args.len() >= 3 {
+        return is_scoped_inheritance_goal(args[1])
+            && (is_expr_head(args[2], "stv-prior") || is_expr_head(args[2], "inv"));
+    }
+    false
+}
+
+fn is_generated_inheritance_view_proof(proof_id: &[u8]) -> bool {
+    if !matches!(byte_item(proof_id[0]), Tag::Arity(_)) {
+        return false;
+    }
+    let args = expr_args(proof_id);
+    if args.is_empty() {
+        return false;
+    }
+    if is_symbol(args[0], "scheduledInvN") {
+        return true;
+    }
+    is_symbol(args[0], "scheduledN")
+        && args.len() >= 3
+        && (is_expr_head(args[2], "stv-prior") || is_expr_head(args[2], "inv"))
+}
+
+fn is_inheritance_refutation_proof(proof_id: &[u8]) -> bool {
+    if !matches!(byte_item(proof_id[0]), Tag::Arity(_)) {
+        return false;
+    }
+    let args = expr_args(proof_id);
+    args.len() >= 3
+        && is_symbol(args[0], "scheduledN")
+        && is_expr_head(args[2], "mp-conclusion-not")
+}
+
+fn proof_identity_equal(left: &ProofRow, right: &ProofRow) -> bool {
+    let same_proof = match (
+        inversion_proof_parts(&left.1),
+        inversion_proof_parts(&right.1),
+    ) {
+        (Some(left), Some(right)) => {
+            alpha_equiv(left.0, right.0)
+                && alpha_equiv(left.1, right.1)
+                && alpha_equiv(left.2, right.2)
+        }
+        _ => alpha_equiv(&left.1, &right.1),
+    };
+    same_proof && evidence_alpha_equal(&left.2, &right.2)
+}
+
 fn is_inversion_snapshot_proof(proof_id: &[u8]) -> bool {
     is_expr_head(proof_id, "scheduledInvN")
 }
 
+// Re-running a logical derivation after a premise or base-rate refinement
+// replaces its previous snapshot. Proof terms may contain freshly allocated
+// variables, so identity is alpha-equivalent proof structure plus evidence,
+// not byte equality. Keep the strongest current snapshot deterministically.
 fn select_current_snapshot_proofs(rows: &BTreeSet<ProofRow>) -> BTreeSet<ProofRow> {
-    let mut selected = BTreeMap::<(Vec<u8>, Vec<u8>), ProofRow>::new();
-    let mut out = BTreeSet::new();
+    let mut selected = Vec::<ProofRow>::new();
     for row in rows {
-        if !is_inversion_snapshot_proof(&row.1) {
-            out.insert(row.clone());
-            continue;
+        if let Some(current) = selected
+            .iter_mut()
+            .find(|current| proof_identity_equal(current, row))
+        {
+            let (strength, confidence) = stv_parts(&row.0);
+            let (current_strength, current_confidence) = stv_parts(&current.0);
+            if confidence
+                .total_cmp(&current_confidence)
+                .then_with(|| strength.total_cmp(&current_strength))
+                .is_gt()
+            {
+                *current = row.clone();
+            }
+        } else {
+            selected.push(row.clone());
         }
-        let key = (row.1.clone(), row.2.clone());
-        selected
-            .entry(key)
-            .and_modify(|current| {
-                let (strength, confidence) = stv_parts(&row.0);
-                let (current_strength, current_confidence) = stv_parts(&current.0);
-                if confidence
-                    .total_cmp(&current_confidence)
-                    .then_with(|| strength.total_cmp(&current_strength))
-                    .is_gt()
-                {
-                    *current = row.clone();
-                }
-            })
-            .or_insert_with(|| row.clone());
     }
-    out.extend(selected.into_values());
-    out
+    selected.into_iter().collect()
 }
 
 #[derive(Clone)]
@@ -1167,8 +1262,10 @@ fn fact_evidence_key_depends_on(
         .get(key)
         .into_iter()
         .flat_map(|rows| rows.iter())
-        .filter_map(parse_scheduled_ctv_proof)
-        .any(|proof| evidence_depends_on_fact_with_stack(&proof.evset, fact, proved, stack));
+        .filter(|(_stv, proof_id, _evset)| is_inheritance_cycle_proof(proof_id))
+        .any(|(_stv, _proof_id, evset)| {
+            evidence_depends_on_fact_with_stack(evset, fact, proved, stack)
+        });
     stack.remove(key);
     depends
 }
@@ -1613,19 +1710,22 @@ fn factor_merge_with_fact_stvs(
 }
 
 fn all_scheduled_ctv_proof_rows(rows: &BTreeSet<ProofRow>) -> bool {
-    rows.iter().all(|row| parse_scheduled_ctv_proof(row).is_some())
+    rows.iter()
+        .all(|row| parse_scheduled_ctv_proof(row).is_some())
 }
 
 #[derive(Default)]
 struct BaseRateGroup {
     fact_stvs_by_old: BTreeMap<Vec<u8>, Vec<(f64, f64)>>,
+    guarded_proofs_by_old: BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
 }
 
 /// Maintains `(base-rate $patQ $stv)` facts from `(fold-base-rate $patQ $old $stv)`
 /// rows. `$patQ` is an uninstantiated pattern copy that keys the group, `$old` is
 /// the current value, and each row's `$stv` is one matching fact's truth value.
-/// Guarded rows use `(fold-base-rate $patQ $old $stv (without-rule $rule $evset))`
-/// and are skipped when `$evset` contains a matching `(rule-ev $rule)` item.
+/// Guarded rows use
+/// `(fold-base-rate $patQ $old $stv (without-rule $rule $proof $evset))`.
+/// They skip recursive evidence and supersede alpha-equivalent proof snapshots.
 /// The weighted base rate follows PeTTaChainer's BaseRateAcc/BaseRateTv:
 /// strength = sum(s*c)/sum(c), confidence = count-confidence(sum(c)).
 pub struct BaseRateSink {
@@ -1663,12 +1763,24 @@ impl Sink for BaseRateSink {
         assert_eq!(symbol_str(args[0]), "fold-base-rate");
         if args.len() == 5 {
             let guard = expr_args(args[4]);
-            assert_eq!(guard.len(), 3, "without-rule expects rule and evidence");
+            assert_eq!(
+                guard.len(),
+                4,
+                "without-rule expects rule, proof, and evidence"
+            );
             assert_eq!(symbol_str(guard[0]), "without-rule");
-            if evidence_contains_rule(guard[2], guard[1]) {
+            if evidence_contains_rule(guard[3], guard[1]) {
                 self.skipped_rows = true;
                 return;
             }
+            self.groups
+                .entry(args[1].to_vec())
+                .or_default()
+                .guarded_proofs_by_old
+                .entry(args[2].to_vec())
+                .or_default()
+                .insert((args[3].to_vec(), guard[2].to_vec(), guard[3].to_vec()));
+            return;
         }
 
         self.groups
@@ -1699,18 +1811,30 @@ impl Sink for BaseRateSink {
             // Evaluate only the most authoritative snapshot; mixing their rows
             // double-counts the same facts and can let a stale computed value
             // overwrite a higher-confidence manual value.
-            let Some((old, fact_stvs)) = group.fact_stvs_by_old.iter().max_by(
-                |(left, _), (right, _)| {
+            let best_old = group
+                .fact_stvs_by_old
+                .keys()
+                .chain(group.guarded_proofs_by_old.keys())
+                .max_by(|left, right| {
                     let (_, left_c) = stv_parts(left);
                     let (_, right_c) = stv_parts(right);
                     left_c.total_cmp(&right_c).then_with(|| left.cmp(right))
-                },
-            ) else {
+                });
+            let Some(old) = best_old else {
                 continue;
             };
+            let fact_stvs = group.fact_stvs_by_old.get(old).cloned().unwrap_or_default();
+            let guarded = group
+                .guarded_proofs_by_old
+                .get(old)
+                .map(select_current_snapshot_proofs)
+                .unwrap_or_default();
             let mut wsum = 0.0;
             let mut csum = 0.0;
-            for (s, c) in fact_stvs {
+            for (s, c) in fact_stvs
+                .into_iter()
+                .chain(guarded.iter().map(|row| stv_parts(&row.0)))
+            {
                 wsum += s * c;
                 csum += c;
             }
@@ -1747,6 +1871,307 @@ impl Sink for BaseRateSink {
             AlgebraicStatus::None => true,
         };
         self.skipped_rows || removed || added
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
+struct PriorRuleKey {
+    goal: Vec<u8>,
+    premise_stv: Vec<u8>,
+    rule_stv: Vec<u8>,
+    kb: Vec<u8>,
+    antecedent: Vec<u8>,
+    consequent: Vec<u8>,
+    proof_id: Vec<u8>,
+    evset: Vec<u8>,
+    mass: Vec<u8>,
+    antecedent_prior: Vec<u8>,
+    consequent_prior: Vec<u8>,
+    divisor: Vec<u8>,
+}
+
+#[derive(Default)]
+struct PriorRuleGroup {
+    antecedent_rows: BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
+    consequent_rows: BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
+}
+
+/// Computes a plain-STV inheritance rule against the proof-aware, prior-
+/// weighted marginals visible to that grounded application.  Unlike a global
+/// cache, this can exclude both recursive rule evidence and the current
+/// subject, matching FoldAll's cycle behavior in PeTTaChainer.
+pub struct PriorRuleStvSink {
+    groups: BTreeMap<PriorRuleKey, PriorRuleGroup>,
+}
+
+fn inheritance_subject(goal: &[u8]) -> Option<&[u8]> {
+    if !matches!(byte_item(goal[0]), Tag::Arity(_)) {
+        return None;
+    }
+    let scoped = expr_args(goal);
+    if scoped.len() != 2 || !matches!(byte_item(scoped[1][0]), Tag::Arity(_)) {
+        return None;
+    }
+    let inheritance = expr_args(scoped[1]);
+    (inheritance.len() == 3 && is_symbol(inheritance[0], "Inheritance")).then_some(inheritance[1])
+}
+
+fn prior_candidate_goal<'a>(wrapped: &'a [u8], proof: &[u8]) -> Option<&'a [u8]> {
+    if is_symbol(proof, "no-prior-proof") {
+        return None;
+    }
+    let args = expr_args(wrapped);
+    (args.len() == 3 && is_symbol(args[0], "prior-candidate")).then_some(args[2])
+}
+
+fn prior_candidate_allowed(proof: &[u8]) -> bool {
+    if !matches!(byte_item(proof[0]), Tag::Arity(_)) {
+        return true;
+    }
+    let args = expr_args(proof);
+    if args.is_empty() {
+        return true;
+    }
+    if is_symbol(args[0], "scheduledN") && args.len() >= 3 {
+        // PeTTa's one-pass forward marginal observes asserted inheritance
+        // links and explicit refutations.  Positive derived links are rule
+        // consequences, not new population observations; admitting them here
+        // recreates the obsolete warm-up/two-pass base-rate feedback.
+        return is_expr_head(args[2], "mp-conclusion-not");
+    }
+    !is_symbol(args[0], "scheduledInvN")
+}
+
+fn merge_current_goal_rows(rows: &BTreeSet<ProofRow>) -> Option<Vec<u8>> {
+    let mut current = select_current_snapshot_proofs(rows).into_iter();
+    let (mut stv, _proof, mut evset) = current.next()?;
+    for (next_stv, _next_proof, next_evset) in current {
+        let (merged, merged_evset) = merge_evidenced_stv(&stv, &evset, &next_stv, &next_evset);
+        stv = merged;
+        evset = merged_evset;
+    }
+    Some(stv)
+}
+
+fn prior_weighted_base_rate(
+    rows: &BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
+    mass: &[u8],
+    prior: &[u8],
+    divisor: f64,
+) -> Vec<u8> {
+    let (mass_s, mass_c) = stv_parts(mass);
+    let mut wsum = 0.0;
+    let mut msum = 0.0;
+    for rows in rows.values() {
+        let Some(stv) = merge_current_goal_rows(rows) else {
+            continue;
+        };
+        let (strength, confidence) = stv_parts(&stv);
+        let weighted_mass = mass_s * mass_c * confidence;
+        wsum += strength * weighted_mass;
+        msum += weighted_mass;
+    }
+    if msum <= 0.0 {
+        return prior.to_vec();
+    }
+    let evidence = stv_bytes(wsum / msum, (msum / divisor).min(1.0));
+    let (_, prior_c) = stv_parts(prior);
+    if prior_c <= 0.0 {
+        evidence
+    } else {
+        revise_stv(prior, &evidence)
+    }
+}
+
+fn prior_proof_signature(group: &PriorRuleGroup) -> Vec<u8> {
+    fn current_proof_ids(rows: &BTreeMap<Vec<u8>, BTreeSet<ProofRow>>) -> Vec<Vec<u8>> {
+        let mut proof_ids = Vec::new();
+        for goal_rows in rows.values() {
+            proof_ids.extend(
+                select_current_snapshot_proofs(goal_rows)
+                    .into_iter()
+                    .map(|(_stv, proof_id, _evset)| proof_id),
+            );
+        }
+        proof_ids.sort();
+        proof_ids.dedup();
+        proof_ids
+    }
+
+    let antecedent_ids = current_proof_ids(&group.antecedent_rows);
+    let consequent_ids = current_proof_ids(&group.consequent_rows);
+    let antecedent_refs: Vec<&[u8]> = antecedent_ids.iter().map(Vec::as_slice).collect();
+    let consequent_refs: Vec<&[u8]> = consequent_ids.iter().map(Vec::as_slice).collect();
+    let mut antecedent = Vec::new();
+    let mut consequent = Vec::new();
+    push_expr(&mut antecedent, "antecedent-proofs", &antecedent_refs);
+    push_expr(&mut consequent, "consequent-proofs", &consequent_refs);
+    let mut signature = Vec::new();
+    push_expr(
+        &mut signature,
+        "prior-proof-set",
+        &[&antecedent, &consequent],
+    );
+    signature
+}
+
+impl Sink for PriorRuleStvSink {
+    fn new(_e: Expr) -> Self {
+        Self {
+            groups: BTreeMap::new(),
+        }
+    }
+
+    fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
+        std::iter::once(WriteResourceRequest::BTM([].as_slice()))
+    }
+
+    fn sink<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+        path: &[u8],
+    ) where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        let args = expr_args(&path[wz.root_prefix_path().len()..]);
+        assert_eq!(args.len(), 21, "prior-rule-stv expects 20 payload args");
+        assert_eq!(symbol_str(args[0]), "prior-rule-stv");
+
+        let key = PriorRuleKey {
+            goal: args[1].to_vec(),
+            premise_stv: args[2].to_vec(),
+            rule_stv: args[3].to_vec(),
+            kb: args[4].to_vec(),
+            antecedent: args[5].to_vec(),
+            consequent: args[6].to_vec(),
+            proof_id: args[7].to_vec(),
+            evset: args[8].to_vec(),
+            mass: args[9].to_vec(),
+            antecedent_prior: args[10].to_vec(),
+            consequent_prior: args[11].to_vec(),
+            divisor: args[12].to_vec(),
+        };
+        let Some(subject) = inheritance_subject(&key.goal) else {
+            return;
+        };
+        let group = self.groups.entry(key.clone()).or_default();
+
+        let add_candidate =
+            |goal: &[u8],
+             stv: &[u8],
+             proof: &[u8],
+             evset: &[u8],
+             exclude_current_subject: bool,
+             target: &mut BTreeMap<Vec<u8>, BTreeSet<ProofRow>>| {
+                if (exclude_current_subject && inheritance_subject(goal) == Some(subject))
+                    || !prior_candidate_allowed(proof)
+                    || evidence_dependent(&key.evset, evset)
+                {
+                    return;
+                }
+                target.entry(goal.to_vec()).or_default().insert((
+                    stv.to_vec(),
+                    proof.to_vec(),
+                    evset.to_vec(),
+                ));
+            };
+        if let Some(goal) = prior_candidate_goal(args[13], args[15]) {
+            add_candidate(
+                goal,
+                args[14],
+                args[15],
+                args[16],
+                false,
+                &mut group.antecedent_rows,
+            );
+        }
+        if let Some(goal) = prior_candidate_goal(args[17], args[19]) {
+            add_candidate(
+                goal,
+                args[18],
+                args[19],
+                args[20],
+                true,
+                &mut group.consequent_rows,
+            );
+        }
+    }
+
+    fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+    ) -> bool
+    where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        wz.reset();
+        let mut add = PathMap::new();
+
+        for (key, group) in &self.groups {
+            let signature = prior_proof_signature(group);
+            let mut snapshot = Vec::new();
+            push_expr(
+                &mut snapshot,
+                "prior-stv-snapshot",
+                &[&key.goal, &key.premise_stv, &key.proof_id, &signature],
+            );
+            wz.reset();
+            wz.move_to_path(&snapshot[wz.root_prefix_path().len()..]);
+            if wz.path_exists() {
+                continue;
+            }
+            add.insert(&snapshot, ());
+
+            let divisor = stv_f64(&key.divisor, "divisor").max(f64::EPSILON);
+            let antecedent = prior_weighted_base_rate(
+                &group.antecedent_rows,
+                &key.mass,
+                &key.antecedent_prior,
+                divisor,
+            );
+            let consequent = prior_weighted_base_rate(
+                &group.consequent_rows,
+                &key.mass,
+                &key.consequent_prior,
+                divisor,
+            );
+            let (ante_s, ante_c) = stv_parts(&antecedent);
+            let (cons_s, cons_c) = stv_parts(&consequent);
+            let (rule_s, rule_c) = stv_parts(&key.rule_stv);
+            let neg_s = if ante_s >= 1.0 {
+                cons_s
+            } else {
+                ((cons_s - ante_s * rule_s) / (1.0 - ante_s)).clamp(0.0, 1.0)
+            };
+            let neg_c = 0.25 * ante_c.min(cons_c).min(rule_c);
+            let negative = stv_bytes(neg_s, neg_c);
+            let proof_stv = OrStvSink::mp_stv(&key.premise_stv, &key.rule_stv, &negative);
+
+            let mut open_proof = Vec::new();
+            push_expr(
+                &mut open_proof,
+                "open-proof",
+                &[&key.goal, &proof_stv, &key.proof_id, &key.evset],
+            );
+            add.insert(&open_proof, ());
+        }
+
+        // Keep the grounded application active.  Its FoldAll marginals are
+        // late-bound: proofs discovered by another rule in a later step must
+        // be able to replace this rule's earlier prior-only snapshot.  The
+        // A prior-stv-snapshot marker makes this event-driven: a stable
+        // application does not keep producing floating-point refinements.
+        wz.reset();
+        let added = !matches!(wz.join_into(&add.read_zipper()), AlgebraicStatus::Identity);
+        added
     }
 }
 
@@ -2732,17 +3157,59 @@ impl Sink for ReviseProofsSink {
 
         for (goal, group) in &self.groups {
             let current_proofs = select_current_snapshot_proofs(&group.proofs);
+            let existing_goal_proofs = proved_rows
+                .get_or_insert_with(|| collect_proved_rows(wz))
+                .get(goal)
+                .cloned()
+                .unwrap_or_default();
+            // Generated inheritance views remain backward proof alternatives,
+            // but they do not revise a primary asserted/ordinary positive
+            // proof into a different canonical forward premise. A refutation
+            // is different: it must still revise with a generated positive
+            // view (Flying Raven's Penguin counter-evidence), independent of
+            // which proof happens to reach this sink first.
+            let has_primary_positive_proof = current_proofs
+                .iter()
+                .chain(existing_goal_proofs.iter())
+                .any(|(_stv, proof_id, _evset)| {
+                    !is_generated_inheritance_view_proof(proof_id)
+                        && !is_inheritance_refutation_proof(proof_id)
+                });
+            let canonical_current_proofs: BTreeSet<_> = current_proofs
+                .iter()
+                .filter(|(_stv, proof_id, _evset)| {
+                    !has_primary_positive_proof || !is_generated_inheritance_view_proof(proof_id)
+                })
+                .cloned()
+                .collect();
             let mut factor_rows = BTreeSet::new();
             if group.old_facts.is_empty() {
-                factor_rows.extend(current_proofs.iter().cloned());
+                factor_rows.extend(canonical_current_proofs.iter().cloned());
             } else {
-                factor_rows.extend(group.existing_proofs.iter().cloned());
-                let proved = proved_rows.get_or_insert_with(|| collect_proved_rows(wz));
-                if let Some(rows) = proved.get(goal) {
-                    factor_rows.extend(rows.iter().cloned());
-                }
+                factor_rows.extend(
+                    group
+                        .existing_proofs
+                        .iter()
+                        .filter(|(_stv, proof_id, _evset)| {
+                            !has_primary_positive_proof
+                                || !is_generated_inheritance_view_proof(proof_id)
+                        })
+                        .cloned(),
+                );
+                factor_rows.extend(
+                    existing_goal_proofs
+                        .iter()
+                        .filter(|stored| {
+                            (!has_primary_positive_proof
+                                || !is_generated_inheritance_view_proof(&stored.1))
+                                && !canonical_current_proofs
+                                    .iter()
+                                    .any(|current| proof_identity_equal(stored, current))
+                        })
+                        .cloned(),
+                );
                 if !factor_rows.is_empty() {
-                    factor_rows.extend(current_proofs.iter().cloned());
+                    factor_rows.extend(canonical_current_proofs.iter().cloned());
                 }
             }
             let factored = if factor_rows.len() >= 2 {
@@ -2758,9 +3225,16 @@ impl Sink for ReviseProofsSink {
             } else {
                 None
             };
-            let mut merged = factored
-                .clone()
-                .or_else(|| group.old_facts.iter().next().cloned());
+            let mut merged = if factor_rows.len() == 1 {
+                factor_rows
+                    .iter()
+                    .next()
+                    .map(|(stv, _proof_id, evset)| (stv.clone(), evset.clone()))
+            } else {
+                factored
+                    .clone()
+                    .or_else(|| group.old_facts.iter().next().cloned())
+            };
             for (old_stv, old_ev) in &group.old_facts {
                 let mut fact = Vec::new();
                 push_expr(&mut fact, "fact", &[goal, old_stv]);
@@ -2774,40 +3248,24 @@ impl Sink for ReviseProofsSink {
                 );
                 remove.insert(&fact_evidence[..], ());
             }
-            let existing_goal_proofs = if group
-                .proofs
-                .iter()
-                .any(|(_, proof_id, _)| is_inversion_snapshot_proof(proof_id))
-            {
-                proved_rows
-                    .get_or_insert_with(|| collect_proved_rows(wz))
-                    .get(goal)
-                    .cloned()
-            } else {
-                None
-            };
             for (stv, proof_id, evset) in &current_proofs {
                 let mut open_proof = Vec::new();
                 push_expr(&mut open_proof, "open-proof", &[goal, stv, proof_id, evset]);
                 remove.insert(&open_proof[..], ());
 
-                // scheduledInvN identifies a logical proof independently of the
-                // base-rate snapshot used to calculate its TV.  A refreshed
-                // snapshot therefore replaces the prior proved row instead of
-                // accumulating another version of the same proof.
-                if is_inversion_snapshot_proof(proof_id) {
-                    if let Some(rows) = &existing_goal_proofs {
-                        for (old_stv, old_proof_id, old_evset) in rows {
-                            if old_proof_id == proof_id && evidence_equal(old_evset, evset) {
-                                let mut old_proved = Vec::new();
-                                push_expr(
-                                    &mut old_proved,
-                                    "proved",
-                                    &[goal, old_stv, old_proof_id, old_evset],
-                                );
-                                remove.insert(&old_proved[..], ());
-                            }
-                        }
+                // A refined snapshot supersedes its alpha-equivalent stored
+                // proof before revision, for ordinary and inversion rules.
+                let current = (stv.clone(), proof_id.clone(), evset.clone());
+                for (old_stv, old_proof_id, old_evset) in &existing_goal_proofs {
+                    let old = (old_stv.clone(), old_proof_id.clone(), old_evset.clone());
+                    if proof_identity_equal(&old, &current) {
+                        let mut old_proved = Vec::new();
+                        push_expr(
+                            &mut old_proved,
+                            "proved",
+                            &[goal, old_stv, old_proof_id, old_evset],
+                        );
+                        remove.insert(&old_proved[..], ());
                     }
                 }
 
@@ -2815,7 +3273,38 @@ impl Sink for ReviseProofsSink {
                 push_expr(&mut proved, "proved", &[goal, stv, proof_id, evset]);
                 add.insert(&proved[..], ());
 
-                if factored.is_none() {
+                // Query-local lift producers are private frontier goals. A
+                // producer embeds its public target and all downstream goals,
+                // so publish every revised proof snapshot here while the sink
+                // is already iterating the complete proof group. Doing this at
+                // proof revision avoids first-match exec ordering entirely.
+                if matches!(byte_item(goal[0]), Tag::Arity(_)) {
+                    let producer = expr_args(goal);
+                    if producer.len() == 5 && is_symbol(producer[0], "mm2-query-producer") {
+                        let mut published_proof = Vec::new();
+                        push_expr(&mut published_proof, "query-producer", &[proof_id]);
+                        let mut published = Vec::new();
+                        push_expr(
+                            &mut published,
+                            "open-proof",
+                            &[producer[2], stv, &published_proof, evset],
+                        );
+                        add.insert(&published, ());
+
+                        let mut downstreams = Vec::new();
+                        if collect_pcons(producer[4], &mut downstreams) {
+                            for downstream in downstreams {
+                                let mut downstream_goal = Vec::new();
+                                push_expr(&mut downstream_goal, "Goal", &[&downstream]);
+                                let mut token = Vec::new();
+                                push_expr(&mut token, ",", &[&downstream_goal]);
+                                add.insert(&token, ());
+                            }
+                        }
+                    }
+                }
+
+                if factored.is_none() && canonical_current_proofs.contains(&current) {
                     let depends_on_goal = if group.old_facts.is_empty() {
                         false
                     } else {
@@ -4253,6 +4742,7 @@ pub enum ASink {
     TailSink(HeadTailSink<false>),
     ReviseProofsSink(ReviseProofsSink),
     BaseRateSink(BaseRateSink),
+    PriorRuleStvSink(PriorRuleStvSink),
     PairCountsSink(PairCountsSink),
     DistAverageSink(DistAverageSink),
     DistSumSink(DistSumSink),
@@ -4346,6 +4836,12 @@ impl Sink for ASink {
                 && &*slice_from_raw_parts(e.ptr.offset(2), 14) == b"fold-base-rate"
         } {
             ASink::BaseRateSink(BaseRateSink::new(e))
+        } else if cfg!(feature = "pln") && unsafe {
+            *e.ptr == item_byte(Tag::Arity(21))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(14))
+                && &*slice_from_raw_parts(e.ptr.offset(2), 14) == b"prior-rule-stv"
+        } {
+            ASink::PriorRuleStvSink(PriorRuleStvSink::new(e))
         } else if cfg!(feature = "pln") && unsafe {
             *e.ptr == item_byte(Tag::Arity(4))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(11))
@@ -4557,6 +5053,11 @@ impl Sink for ASink {
                         yield i
                     }
                 }
+                ASink::PriorRuleStvSink(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
                 ASink::PairCountsSink(s) => {
                     for i in s.request().into_iter() {
                         yield i
@@ -4680,6 +5181,7 @@ impl Sink for ASink {
             ASink::TailSink(s) => s.sink(it, path),
             ASink::ReviseProofsSink(s) => s.sink(it, path),
             ASink::BaseRateSink(s) => s.sink(it, path),
+            ASink::PriorRuleStvSink(s) => s.sink(it, path),
             ASink::PairCountsSink(s) => s.sink(it, path),
             ASink::DistAverageSink(s) => s.sink(it, path),
             ASink::DistSumSink(s) => s.sink(it, path),
@@ -4723,6 +5225,7 @@ impl Sink for ASink {
             ASink::TailSink(s) => s.finalize(it),
             ASink::ReviseProofsSink(s) => s.finalize(it),
             ASink::BaseRateSink(s) => s.finalize(it),
+            ASink::PriorRuleStvSink(s) => s.finalize(it),
             ASink::PairCountsSink(s) => s.finalize(it),
             ASink::DistAverageSink(s) => s.finalize(it),
             ASink::DistSumSink(s) => s.finalize(it),
