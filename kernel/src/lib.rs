@@ -65,4 +65,33 @@ mod tests {
         assert!(output.contains("(total b 4)\n"));
         assert!(output.contains("(total stable 1)\n"));
     }
+
+    #[test]
+    fn one_of_projects_alternative_shapes_to_one_relation() {
+        let mut space = Space::new();
+        space.add_all_sexpr(br#"
+            (exec 0
+                (I (BTM (wanted $goal))
+                   (one-of
+                       (value $goal ($first $second))
+                       (left $goal ($first $second))
+                       (right $goal (wrapped ($first $second) $ignored))))
+                (, (seen $goal ($first $second))))
+            (wanted a)
+            (wanted b)
+            (wanted missing)
+            (left a (one two))
+            (right a (wrapped (one two) ignored))
+            (right b (wrapped (three four) ignored))
+        "#).unwrap();
+
+        assert_eq!(space.metta_calculus(1), 1);
+
+        let mut output = Vec::new();
+        space.dump_all_sexpr(&mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(output.matches("(seen a (one two))\n").count(), 1, "{output}");
+        assert!(output.contains("(seen b (three four))\n"), "{output}");
+        assert!(!output.contains("(seen missing"), "{output}");
+    }
 }
