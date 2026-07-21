@@ -943,6 +943,38 @@ fn evidence_dependent(left: &[u8], right: &[u8]) -> bool {
         .any(|item| left.contains(item) && is_expr_head(item, "rule-ev"))
 }
 
+fn evidence_overlaps(left: &[u8], right: &[u8]) -> bool {
+    let left = evidence_set(left);
+    evidence_set(right).iter().any(|item| left.contains(item))
+}
+
+fn inheritance_rule_source(rule: &[u8]) -> Option<&[u8]> {
+    if !matches!(byte_item(rule[0]), Tag::Arity(_)) {
+        return None;
+    }
+    let args = expr_args(rule);
+    let head = if args.len() == 2 && matches!(byte_item(args[0][0]), Tag::Arity(_)) {
+        args[0]
+    } else {
+        rule
+    };
+    let head_args = expr_args(head);
+    (head_args.len() == 2 && is_symbol(head_args[0], "inheritance-implication"))
+        .then_some(head_args[1])
+}
+
+fn evidence_uses_inheritance_source(evidence: &[u8], proof: &[u8]) -> bool {
+    evidence_set(evidence).iter().any(|item| {
+        if !matches!(byte_item(item[0]), Tag::Arity(_)) {
+            return false;
+        }
+        let args = expr_args(item);
+        args.len() == 2
+            && is_symbol(args[0], "rule-ev")
+            && inheritance_rule_source(args[1]).is_some_and(|source| alpha_equiv(source, proof))
+    })
+}
+
 fn evidence_equal(left: &[u8], right: &[u8]) -> bool {
     evidence_set(left) == evidence_set(right)
 }
@@ -1926,6 +1958,7 @@ struct PriorRuleKey {
     consequent: Vec<u8>,
     proof_id: Vec<u8>,
     evset: Vec<u8>,
+    premise_evset: Vec<u8>,
     mass: Vec<u8>,
     antecedent_prior: Vec<u8>,
     consequent_prior: Vec<u8>,
@@ -2081,8 +2114,13 @@ impl Sink for PriorRuleStvSink {
             unreachable!()
         };
         let args = expr_args(&path[wz.root_prefix_path().len()..]);
-        assert_eq!(args.len(), 21, "prior-rule-stv expects 20 payload args");
+        assert!(
+            args.len() == 21 || args.len() == 22,
+            "prior-rule-stv expects 20 or 21 payload args"
+        );
         assert_eq!(symbol_str(args[0]), "prior-rule-stv");
+        let has_premise_evidence = args.len() == 22;
+        let candidate_offset = usize::from(has_premise_evidence);
 
         let key = PriorRuleKey {
             goal: args[1].to_vec(),
@@ -2093,10 +2131,15 @@ impl Sink for PriorRuleStvSink {
             consequent: args[6].to_vec(),
             proof_id: args[7].to_vec(),
             evset: args[8].to_vec(),
-            mass: args[9].to_vec(),
-            antecedent_prior: args[10].to_vec(),
-            consequent_prior: args[11].to_vec(),
-            divisor: args[12].to_vec(),
+            premise_evset: if has_premise_evidence {
+                args[9].to_vec()
+            } else {
+                symbol_bytes("pnil")
+            },
+            mass: args[9 + candidate_offset].to_vec(),
+            antecedent_prior: args[10 + candidate_offset].to_vec(),
+            consequent_prior: args[11 + candidate_offset].to_vec(),
+            divisor: args[12 + candidate_offset].to_vec(),
         };
         let Some(subject) = inheritance_subject(&key.goal) else {
             return;
@@ -2115,13 +2158,16 @@ impl Sink for PriorRuleStvSink {
             wz.reset();
             exists
         };
-        let antecedent_candidate = prior_candidate_goal(args[13], args[15]);
+        let candidate_start = 13 + candidate_offset;
+        let antecedent_candidate =
+            prior_candidate_goal(args[candidate_start], args[candidate_start + 2]);
         let antecedent_forward = antecedent_candidate
-            .map(|(goal, mode)| mode || is_forward_observed(goal, args[15]))
+            .map(|(goal, mode)| mode || is_forward_observed(goal, args[candidate_start + 2]))
             .unwrap_or(false);
-        let consequent_candidate = prior_candidate_goal(args[17], args[19]);
+        let consequent_candidate =
+            prior_candidate_goal(args[candidate_start + 4], args[candidate_start + 6]);
         let consequent_forward = consequent_candidate
-            .map(|(goal, mode)| mode || is_forward_observed(goal, args[19]))
+            .map(|(goal, mode)| mode || is_forward_observed(goal, args[candidate_start + 6]))
             .unwrap_or(false);
         drop(is_forward_observed);
         let group = self.groups.entry(key.clone()).or_default();
@@ -2137,7 +2183,10 @@ impl Sink for PriorRuleStvSink {
                 if !forward_observed
                     && ((exclude_current_subject && inheritance_subject(goal) == Some(subject))
                         || !prior_candidate_allowed(proof)
-                        || evidence_dependent(&key.evset, evset))
+                        || evidence_dependent(&key.evset, evset)
+                        || evidence_overlaps(&key.premise_evset, evset)
+                        || evidence_uses_inheritance_source(&key.evset, proof)
+                        || evidence_uses_inheritance_source(&key.premise_evset, proof))
                 {
                     return;
                 }
@@ -2150,9 +2199,9 @@ impl Sink for PriorRuleStvSink {
         if let Some((goal, _mode)) = antecedent_candidate {
             add_candidate(
                 goal,
-                args[14],
-                args[15],
-                args[16],
+                args[candidate_start + 1],
+                args[candidate_start + 2],
+                args[candidate_start + 3],
                 false,
                 antecedent_forward,
                 &mut group.antecedent_rows,
@@ -2161,9 +2210,9 @@ impl Sink for PriorRuleStvSink {
         if let Some((goal, _mode)) = consequent_candidate {
             add_candidate(
                 goal,
-                args[18],
-                args[19],
-                args[20],
+                args[candidate_start + 5],
+                args[candidate_start + 6],
+                args[candidate_start + 7],
                 true,
                 consequent_forward,
                 &mut group.consequent_rows,
@@ -2225,11 +2274,12 @@ impl Sink for PriorRuleStvSink {
             let negative = stv_bytes(neg_s, neg_c);
             let proof_stv = OrStvSink::mp_stv(&key.premise_stv, &key.rule_stv, &negative);
 
+            let merged_evset = evidence_union(&key.evset, &key.premise_evset);
             let mut open_proof = Vec::new();
             push_expr(
                 &mut open_proof,
                 "open-proof",
-                &[&key.goal, &proof_stv, &key.proof_id, &key.evset],
+                &[&key.goal, &proof_stv, &key.proof_id, &merged_evset],
             );
             add.insert(&open_proof, ());
         }
@@ -4907,7 +4957,7 @@ impl Sink for ASink {
         } {
             ASink::BaseRateSink(BaseRateSink::new(e))
         } else if cfg!(feature = "pln") && unsafe {
-            *e.ptr == item_byte(Tag::Arity(21))
+            (*e.ptr == item_byte(Tag::Arity(21)) || *e.ptr == item_byte(Tag::Arity(22)))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(14))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 14) == b"prior-rule-stv"
         } {
