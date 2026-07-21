@@ -2,13 +2,118 @@ use log::trace;
 use pathmap::arena_compact::{ACTMmapZipper};
 use pathmap::PathMap;
 use pathmap::zipper::*;
-use mork_expr::{byte_item, destruct, item_byte, serialize, Expr, Tag};
+use mork_expr::{byte_item, destruct, item_byte, serialize, Expr, ExprEnv, Tag};
 use mork_expr::macros::SerializableExpr;
+use std::collections::BTreeSet;
 
 pub enum ResourceRequest {
     BTM(&'static [u8]),
     ACT(&'static str),
     Z3(&'static str)
+}
+
+fn is_named_expr(e: Expr, name: &[u8], arity: u8) -> bool {
+    if e.arity() != Some(arity) {
+        return false;
+    }
+
+    let mut args = Vec::new();
+    ExprEnv::new(0, e).args(&mut args);
+    let Some(symbol) = args.first().and_then(|arg| arg.subsexpr().symbol()) else {
+        return false;
+    };
+    unsafe { symbol.as_ref() == Some(name) }
+}
+
+/// Selects the first (`HEAD`) or last (`!HEAD`) `limit` matching paths.
+///
+/// Ordering is the lexicographic order of MORK's encoded expressions, the same
+/// order used by the backing `PathMap`.
+struct HeadTailSource<const HEAD: bool> {
+    limit: usize,
+    source_prefix: Vec<u8>,
+    target_prefix: Vec<u8>,
+}
+
+impl<const HEAD: bool> Source for HeadTailSource<HEAD> {
+    fn new(e: Expr) -> Self {
+        let mut args = Vec::new();
+        ExprEnv::new(0, e).args(&mut args);
+        assert_eq!(args.len(), 3, "head/tail expects a limit and a pattern");
+
+        let limit_symbol = args[1]
+            .subsexpr()
+            .symbol()
+            .and_then(|symbol| unsafe { symbol.as_ref() })
+            .expect("head/tail limit must be a symbol");
+        let limit = std::str::from_utf8(limit_symbol)
+            .expect("head/tail limit must be UTF-8")
+            .parse()
+            .expect("head/tail limit must be a positive integer");
+        assert_ne!(limit, 0, "head/tail limit must be positive");
+
+        let target = args[2].subsexpr();
+        let source_span = unsafe { e.span().as_ref().unwrap() };
+        let target_offset = unsafe { target.ptr.offset_from(e.ptr) as usize };
+        let target_prefix = unsafe {
+            target
+                .prefix()
+                .unwrap_or_else(|full| full)
+                .as_ref()
+                .unwrap()
+        };
+
+        Self {
+            limit,
+            source_prefix: source_span[..target_offset].to_vec(),
+            target_prefix: target_prefix.to_vec(),
+        }
+    }
+
+    fn request(&self) -> impl Iterator<Item = ResourceRequest> {
+        trace!(target: "source", "head/tail requesting {}", serialize(&self.target_prefix));
+        std::iter::once(ResourceRequest::BTM([].as_slice()))
+    }
+
+    fn source<'trie, 'path, It: Iterator<Item = Resource<'trie, 'path>>>(
+        &self,
+        mut resources: It,
+    ) -> AFactor<'trie, ()>
+    where
+        'path: 'trie,
+    {
+        let Resource::BTM(mut source) = resources.next().unwrap() else { unreachable!() };
+        let mut selected = BTreeSet::new();
+
+        if source.descend_to_existing(&self.target_prefix) == self.target_prefix.len() {
+            while source.to_next_val() {
+                let Some(relative) = source
+                    .origin_path()
+                    .strip_prefix(self.target_prefix.as_slice())
+                else {
+                    break;
+                };
+                selected.insert(relative.to_vec());
+                if selected.len() > self.limit {
+                    let outside = if HEAD {
+                        selected.last().unwrap().clone()
+                    } else {
+                        selected.first().unwrap().clone()
+                    };
+                    selected.remove(&outside);
+                }
+            }
+        }
+
+        let mut output = PathMap::new();
+        for relative in selected {
+            let mut path = self.source_prefix.clone();
+            path.extend_from_slice(&self.target_prefix);
+            path.extend_from_slice(&relative);
+            output.insert(&path, ());
+        }
+        AFactor::MaterializedSource(output.into_read_zipper(&[]))
+    }
 }
 
 pub(crate) enum Resource<'trie, 'path> {
@@ -194,7 +299,7 @@ impl Source for CmpSource {
 }
 
 
-pub enum ASource { PosSource(BTMSource), ACTSource(ACTSource), CmpSource(CmpSource), CompatSource(CompatSource),
+pub enum ASource { PosSource(BTMSource), ACTSource(ACTSource), CmpSource(CmpSource), HeadSource(HeadTailSource<true>), TailSource(HeadTailSource<false>), CompatSource(CompatSource),
     #[cfg(feature = "z3")]
     Z3Source(Z3Source)
 }
@@ -206,6 +311,7 @@ pub enum AFactor<'trie, V: Clone + Send + Sync + Unpin + 'static = ()> {
     ACTSource(PrefixZipper<'trie, ACTMmapZipper<'trie, V>>),
     CmpSource(PrefixZipper<'trie, DependentProductZipperG<'trie, ReadZipperUntracked<'trie, 'trie, V>,
         ReadZipperOwned<V>, V, (usize, PathMap<()>), for<'a> fn((usize, PathMap<()>), &'a [u8], usize) -> ((usize, PathMap<()>), Option<ReadZipperOwned<V>>)>>),
+    MaterializedSource(ReadZipperOwned<V>),
     #[cfg(feature = "z3")]
     Z3Source(PrefixZipper<'trie, ReadZipperOwned<V>>),
 }
@@ -229,6 +335,10 @@ impl Source for ASource {
             panic!("MORK was not built with the z3 feature, yet trying to call {:?}", e);
         } else if unsafe { *e.ptr == item_byte(Tag::Arity(3)) && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(2)) && (*e.ptr.offset(2) == b'=' || *e.ptr.offset(2) == b'!') && *e.ptr.offset(3) == b'=' } {
             ASource::CmpSource(CmpSource::new(e))
+        } else if is_named_expr(e, b"head", 3) {
+            ASource::HeadSource(HeadTailSource::new(e))
+        } else if is_named_expr(e, b"tail", 3) {
+            ASource::TailSource(HeadTailSource::new(e))
         } else {
             unreachable!()
         }
@@ -240,6 +350,8 @@ impl Source for ASource {
                 ASource::PosSource(s) => { for i in s.request().into_iter() { yield i } }
                 ASource::ACTSource(s) => { for i in s.request().into_iter() { yield i } }
                 ASource::CmpSource(s) => { for i in s.request().into_iter() { yield i } }
+                ASource::HeadSource(s) => { for i in s.request().into_iter() { yield i } }
+                ASource::TailSource(s) => { for i in s.request().into_iter() { yield i } }
                 ASource::CompatSource(s) => { for i in s.request().into_iter() { yield i } }
                 #[cfg(feature = "z3")]
                 ASource::Z3Source(s) => { for i in s.request().into_iter() { yield i } }
@@ -252,6 +364,8 @@ impl Source for ASource {
             ASource::PosSource(s) => { s.source(it) }
             ASource::ACTSource(s) => { s.source(it) }
             ASource::CmpSource(s) => { s.source(it) }
+            ASource::HeadSource(s) => { s.source(it) }
+            ASource::TailSource(s) => { s.source(it) }
             ASource::CompatSource(s) => { s.source(it) }
             #[cfg(feature = "z3")]
             ASource::Z3Source(s) => { s.source(it) }
