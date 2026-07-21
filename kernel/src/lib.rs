@@ -40,4 +40,29 @@ mod tests {
         assert!(output.contains("(tail-picked 4)\n"));
         assert!(!output.contains("(tail-picked 2)\n"));
     }
+
+    #[test]
+    fn ordered_float_sum_groups_and_deduplicates_rows() {
+        let mut space = Space::new();
+        space.add_all_sexpr(br#"
+            (row a z 1.5)
+            (row a a 2.5)
+            (row a a 2.5)
+            (row b q 4.0)
+            (row stable c 1)
+            (row stable a 10000000000000000)
+            (row stable b -10000000000000000)
+            (exec 0 (, (row $group $order $value))
+                (O (fsum (total $group $sum) $sum $value $order)))
+        "#).unwrap();
+
+        assert_eq!(space.metta_calculus(1), 1);
+
+        let mut output = Vec::new();
+        space.dump_all_sexpr(&mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("(total a 4)\n"));
+        assert!(output.contains("(total b 4)\n"));
+        assert!(output.contains("(total stable 1)\n"));
+    }
 }
