@@ -743,118 +743,9 @@ op!(num binary lte_f64(x: f64, y: f64) => (x <= y) as i8);
 op!(num binary gte_f64(x: f64, y: f64) => (x >= y) as i8);
 op!(num binary eq_f64(x: f64, y: f64) => (x == y) as i8);
 
-/// Variance of a clipped Bernoulli estimate whose effective sample count is
-/// encoded as `confidence`: `k*c/(1-min(c, confidence_cap))`.
-pub extern "C" fn binomial_estimate_variance_f64(
-    expr: *mut ExprSource,
-    sink: *mut ExprSink,
-) -> Result<(), EvalError> {
-    let expr = unsafe { &mut *expr };
-    let sink = unsafe { &mut *sink };
-    let items = expr.consume_head_check(b"binomial_estimate_variance_f64")?;
-    if items != 6 {
-        return Err(EvalError::from(
-            "binomial_estimate_variance_f64 takes six arguments",
-        ));
-    }
-    let estimate = expr.consume::<f64>()?;
-    let confidence = expr.consume::<f64>()?;
-    let k = expr.consume::<f64>()?;
-    let estimate_min = expr.consume::<f64>()?;
-    let estimate_max = expr.consume::<f64>()?;
-    let confidence_cap = expr.consume::<f64>()?;
-    let count = if confidence <= 0.0 {
-        0.0
-    } else {
-        k * confidence / (1.0 - confidence.min(confidence_cap))
-    };
-    let clipped = estimate.clamp(estimate_min, estimate_max);
-    let variance = clipped * (1.0 - clipped) / (count + 1.0);
-    sink.write(SourceItem::Symbol(variance.to_be_bytes()[..].into()))?;
-    Ok(())
-}
-
-/// First-order variance propagation for the product/ratio `p*a/q`.
-pub extern "C" fn product_ratio_variance_f64(
-    expr: *mut ExprSource,
-    sink: *mut ExprSink,
-) -> Result<(), EvalError> {
-    let expr = unsafe { &mut *expr };
-    let sink = unsafe { &mut *sink };
-    let items = expr.consume_head_check(b"product_ratio_variance_f64")?;
-    if items != 6 {
-        return Err(EvalError::from(
-            "product_ratio_variance_f64 takes six arguments",
-        ));
-    }
-    let p = expr.consume::<f64>()?;
-    let p_variance = expr.consume::<f64>()?;
-    let a = expr.consume::<f64>()?;
-    let a_variance = expr.consume::<f64>()?;
-    let q = expr.consume::<f64>()?;
-    let q_variance = expr.consume::<f64>()?;
-    let d_p = a / q;
-    let d_a = p / q;
-    let d_q = (p * a) / (q * q);
-    let variance = (d_p * d_p) * p_variance
-        + (d_a * d_a) * a_variance
-        + (d_q * d_q) * q_variance;
-    sink.write(SourceItem::Symbol(variance.to_be_bytes()[..].into()))?;
-    Ok(())
-}
-
-/// Convert an estimate variance back to confidence using an effective-count
-/// scale `k`. The remaining arguments make clipping policy explicit.
-pub extern "C" fn confidence_from_variance_f64(
-    expr: *mut ExprSource,
-    sink: *mut ExprSink,
-) -> Result<(), EvalError> {
-    let expr = unsafe { &mut *expr };
-    let sink = unsafe { &mut *sink };
-    let items = expr.consume_head_check(b"confidence_from_variance_f64")?;
-    if items != 7 {
-        return Err(EvalError::from(
-            "confidence_from_variance_f64 takes seven arguments",
-        ));
-    }
-    let estimate = expr.consume::<f64>()?;
-    let variance = expr.consume::<f64>()?;
-    let k = expr.consume::<f64>()?;
-    let estimate_min = expr.consume::<f64>()?;
-    let estimate_max = expr.consume::<f64>()?;
-    let zero_variance_confidence = expr.consume::<f64>()?;
-    let confidence_min = expr.consume::<f64>()?;
-    let confidence = if variance <= 0.0 {
-        zero_variance_confidence
-    } else {
-        let clipped = estimate.clamp(estimate_min, estimate_max);
-        let max_variance = clipped * (1.0 - clipped);
-        let count = max_variance / variance.min(max_variance) - 1.0;
-        (count / (count + k)).max(confidence_min)
-    };
-    sink.write(SourceItem::Symbol(confidence.to_be_bytes()[..].into()))?;
-    Ok(())
-}
 op!(num binary ne_f64(x: f64, y: f64) => (x != y) as i8);
 op!(num from_string f64_from_string<f64>);
 op!(num to_string f64_to_string<f64>);
-
-/// Formats an f64 with `Display`, producing the shortest round-trippable text.
-/// Unlike `f64_to_string`, integral values do not retain a trailing `.0`.
-pub extern "C" fn f64_to_display_string(
-    expr: *mut ExprSource,
-    sink: *mut ExprSink,
-) -> Result<(), EvalError> {
-    let expr = unsafe { &mut *expr };
-    let sink = unsafe { &mut *sink };
-    let items = expr.consume_head_check(b"f64_to_display_string")?;
-    if items != 1 {
-        return Err(EvalError::from("f64_to_display_string takes one argument"));
-    }
-    let text = expr.consume::<f64>()?.to_string();
-    sink.write(SourceItem::Symbol(text.as_bytes()))?;
-    Ok(())
-}
 
 const PLN_EVIDENCE_CONFIDENCE_K: f64 = 800.0;
 
@@ -2141,28 +2032,8 @@ pub fn register(scope: &mut EvalScope) {
     scope.add_func("gte_f64", gte_f64, FuncType::Pure);
     scope.add_func("eq_f64", eq_f64, FuncType::Pure);
     scope.add_func("ne_f64", ne_f64, FuncType::Pure);
-    scope.add_func(
-        "binomial_estimate_variance_f64",
-        binomial_estimate_variance_f64,
-        FuncType::Pure,
-    );
-    scope.add_func(
-        "product_ratio_variance_f64",
-        product_ratio_variance_f64,
-        FuncType::Pure,
-    );
-    scope.add_func(
-        "confidence_from_variance_f64",
-        confidence_from_variance_f64,
-        FuncType::Pure,
-    );
     scope.add_func("f64_from_string", f64_from_string, FuncType::Pure);
     scope.add_func("f64_to_string", f64_to_string, FuncType::Pure);
-    scope.add_func(
-        "f64_to_display_string",
-        f64_to_display_string,
-        FuncType::Pure,
-    );
     #[cfg(feature = "pln")]
     {
         scope.add_func(

@@ -2430,279 +2430,6 @@ impl Sink for PairCountsSink {
     }
 }
 
-#[derive(Default)]
-struct OrderedCollectGroup {
-    output: Vec<u8>,
-    output_var: Vec<u8>,
-    descending: bool,
-    rows: Vec<(Vec<u8>, Vec<u8>)>,
-}
-
-/// `(group-collect $output $result $group asc|desc $order $item)` gathers all
-/// rows for each grounded group, orders them deterministically by `$order` and
-/// then `$item`, builds a canonical pcons list, substitutes it for `$result` in
-/// `$output`, and emits one output atom per group during sink finalization.
-pub struct OrderedCollectSink {
-    groups: BTreeMap<Vec<u8>, OrderedCollectGroup>,
-}
-
-#[derive(Default)]
-struct VectorFloatSumGroup {
-    output: Vec<u8>,
-    output_var: Vec<u8>,
-    rows: Vec<(Vec<u8>, Vec<f64>)>,
-}
-
-/// `(vfsum $output $result ($value ...) $order)` sums numeric vectors per
-/// output group in explicit order and substitutes a tuple of component sums.
-pub struct VectorFloatSumSink {
-    groups: BTreeMap<Vec<u8>, VectorFloatSumGroup>,
-}
-
-impl Sink for VectorFloatSumSink {
-    fn new(_e: Expr) -> Self {
-        Self {
-            groups: BTreeMap::new(),
-        }
-    }
-
-    fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
-        std::iter::once(WriteResourceRequest::BTM([].as_slice()))
-    }
-
-    fn sink<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
-        &mut self,
-        mut it: It,
-        path: &[u8],
-    ) where
-        'a: 'w,
-        'k: 'w,
-    {
-        let WriteResource::BTM(wz) = it.next().unwrap() else {
-            unreachable!()
-        };
-        let row = &path[wz.root_prefix_path().len()..];
-        let args = expr_args(row);
-        assert_eq!(args.len(), 5, "vfsum expects 4 payload arguments");
-        assert!(is_symbol(args[0], "vfsum"));
-        let values = expr_args(args[3])
-            .into_iter()
-            .map(|value| str::parse::<f64>(symbol_str(value)).unwrap())
-            .collect();
-        let output = args[1].to_vec();
-        let output_var = args[2].to_vec();
-        let mut key = output.clone();
-        key.extend_from_slice(&output_var);
-        let group = self
-            .groups
-            .entry(key)
-            .or_insert_with(|| VectorFloatSumGroup {
-                output,
-                output_var,
-                rows: Vec::new(),
-            });
-        group.rows.push((args[4].to_vec(), values));
-    }
-
-    fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
-        &mut self,
-        mut it: It,
-    ) -> bool
-    where
-        'a: 'w,
-        'k: 'w,
-    {
-        let WriteResource::BTM(wz) = it.next().unwrap() else {
-            unreachable!()
-        };
-        wz.reset();
-        let mut groups = BTreeMap::new();
-        std::mem::swap(&mut groups, &mut self.groups);
-        let mut changed = false;
-        let mut buffer = Vec::with_capacity(1 << 20);
-
-        for (_, mut group) in groups {
-            group.rows.sort_by(|left, right| left.0.cmp(&right.0));
-            let width = group.rows.first().map_or(0, |row| row.1.len());
-            let mut totals = vec![0.0; width];
-            for (_, values) in group.rows {
-                assert_eq!(
-                    values.len(),
-                    width,
-                    "vfsum vector width differs within group"
-                );
-                for (total, value) in totals.iter_mut().zip(values) {
-                    *total += value;
-                }
-            }
-            let mut tuple = vec![item_byte(Tag::Arity(width as u8))];
-            for total in totals {
-                tuple.extend_from_slice(&symbol_bytes(&total.to_string()));
-            }
-
-            match byte_item(group.output_var[0]) {
-                Tag::VarRef(k) => {
-                    let output = Expr {
-                        ptr: group.output.as_ptr().cast_mut(),
-                    };
-                    buffer.push(item_byte(Tag::NewVar));
-                    let mut oz = ExprZipper::new(Expr {
-                        ptr: buffer.as_mut_ptr(),
-                    });
-                    output.substitute_one_de_bruijn(
-                        k,
-                        Expr {
-                            ptr: tuple.as_mut_ptr(),
-                        },
-                        &mut oz,
-                    );
-                    unsafe { buffer.set_len(oz.loc) }
-                    wz.move_to_path(&buffer[wz.root_prefix_path().len()..oz.loc]);
-                    changed |= wz.set_val(()).is_none();
-                    buffer.clear();
-                }
-                Tag::NewVar => {
-                    wz.move_to_path(&group.output);
-                    changed |= wz.set_val(()).is_none();
-                }
-                _ if group.output_var == tuple => {
-                    wz.move_to_path(&group.output);
-                    changed |= wz.set_val(()).is_none();
-                }
-                _ => {}
-            }
-        }
-        changed
-    }
-}
-
-impl OrderedCollectSink {
-    fn pcons_list(items: impl DoubleEndedIterator<Item = Vec<u8>>) -> Vec<u8> {
-        let mut out = symbol_bytes("pnil");
-        for item in items.rev() {
-            let mut next = Vec::new();
-            push_expr(&mut next, "pcons", &[&item, &out]);
-            out = next;
-        }
-        out
-    }
-}
-
-impl Sink for OrderedCollectSink {
-    fn new(_e: Expr) -> Self {
-        Self {
-            groups: BTreeMap::new(),
-        }
-    }
-
-    fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
-        std::iter::once(WriteResourceRequest::BTM([].as_slice()))
-    }
-
-    fn sink<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
-        &mut self,
-        mut it: It,
-        path: &[u8],
-    ) where
-        'a: 'w,
-        'k: 'w,
-    {
-        let WriteResource::BTM(wz) = it.next().unwrap() else {
-            unreachable!()
-        };
-        let row = &path[wz.root_prefix_path().len()..];
-        let args = expr_args(row);
-        assert_eq!(args.len(), 7, "group-collect expects 6 payload arguments");
-        assert!(is_symbol(args[0], "group-collect"));
-
-        let descending = if is_symbol(args[4], "asc") {
-            false
-        } else if is_symbol(args[4], "desc") {
-            true
-        } else {
-            panic!("group-collect direction must be asc or desc");
-        };
-        let group = self.groups.entry(args[3].to_vec()).or_default();
-        if group.output.is_empty() {
-            group.output = args[1].to_vec();
-            group.output_var = args[2].to_vec();
-            group.descending = descending;
-        } else {
-            assert_eq!(group.output, args[1], "group-collect output differs within group");
-            assert_eq!(
-                group.output_var, args[2],
-                "group-collect result slot differs within group"
-            );
-            assert_eq!(
-                group.descending, descending,
-                "group-collect direction differs within group"
-            );
-        }
-        group.rows.push((args[5].to_vec(), args[6].to_vec()));
-    }
-
-    fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
-        &mut self,
-        mut it: It,
-    ) -> bool
-    where
-        'a: 'w,
-        'k: 'w,
-    {
-        let WriteResource::BTM(wz) = it.next().unwrap() else {
-            unreachable!()
-        };
-        wz.reset();
-        let mut groups = BTreeMap::new();
-        std::mem::swap(&mut groups, &mut self.groups);
-        let mut changed = false;
-        let mut buffer = Vec::with_capacity(1 << 20);
-
-        for (_, mut group) in groups {
-            group
-                .rows
-                .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-            if group.descending {
-                group.rows.reverse();
-            }
-            let list = Self::pcons_list(group.rows.into_iter().map(|(_, item)| item));
-            match byte_item(group.output_var[0]) {
-                Tag::VarRef(k) => {
-                    let output = Expr {
-                        ptr: group.output.as_ptr().cast_mut(),
-                    };
-                    let mut replacement = list;
-                    buffer.push(item_byte(Tag::NewVar));
-                    let mut oz = ExprZipper::new(Expr {
-                        ptr: buffer.as_mut_ptr(),
-                    });
-                    output.substitute_one_de_bruijn(
-                        k,
-                        Expr {
-                            ptr: replacement.as_mut_ptr(),
-                        },
-                        &mut oz,
-                    );
-                    unsafe { buffer.set_len(oz.loc) }
-                    wz.move_to_path(&buffer[wz.root_prefix_path().len()..oz.loc]);
-                    changed |= wz.set_val(()).is_none();
-                    buffer.clear();
-                }
-                Tag::NewVar => {
-                    wz.move_to_path(&group.output);
-                    changed |= wz.set_val(()).is_none();
-                }
-                _ if group.output_var == list => {
-                    wz.move_to_path(&group.output);
-                    changed |= wz.set_val(()).is_none();
-                }
-                _ => {}
-            }
-        }
-        changed
-    }
-}
-
 pub struct DistAverageSink {
     groups: BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, Vec<(f64, f64)>>>,
 }
@@ -4869,8 +4596,6 @@ pub enum ASink {
     OrStvSink(OrStvSink),
     TotalEvidenceMpSink(TotalEvidenceMpSink),
     CountSink(CountSink),
-    OrderedCollectSink(OrderedCollectSink),
-    VectorFloatSumSink(VectorFloatSumSink),
     HashSink(HashSink),
     SumSink(SumSink),
     AndSink(AndSink),
@@ -5002,16 +4727,6 @@ impl Sink for ASink {
                 && *e.ptr.offset(6) == b't'
         } {
             ASink::CountSink(CountSink::new(e))
-        } else if unsafe {
-            let args = expr_args(e.span().as_ref().unwrap());
-            args.len() == 7 && is_symbol(args[0], "group-collect")
-        } {
-            ASink::OrderedCollectSink(OrderedCollectSink::new(e))
-        } else if unsafe {
-            let args = expr_args(e.span().as_ref().unwrap());
-            args.len() == 5 && is_symbol(args[0], "vfsum")
-        } {
-            ASink::VectorFloatSumSink(VectorFloatSumSink::new(e))
         } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(4))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(4))
@@ -5208,16 +4923,6 @@ impl Sink for ASink {
                         yield i
                     }
                 }
-                ASink::OrderedCollectSink(s) => {
-                    for i in s.request().into_iter() {
-                        yield i
-                    }
-                }
-                ASink::VectorFloatSumSink(s) => {
-                    for i in s.request().into_iter() {
-                        yield i
-                    }
-                }
                 ASink::HashSink(s) => {
                     for i in s.request().into_iter() {
                         yield i
@@ -5308,8 +5013,6 @@ impl Sink for ASink {
             ASink::OrStvSink(s) => s.sink(it, path),
             ASink::TotalEvidenceMpSink(s) => s.sink(it, path),
             ASink::CountSink(s) => s.sink(it, path),
-            ASink::OrderedCollectSink(s) => s.sink(it, path),
-            ASink::VectorFloatSumSink(s) => s.sink(it, path),
             ASink::HashSink(s) => s.sink(it, path),
             ASink::SumSink(s) => s.sink(it, path),
             ASink::AndSink(s) => s.sink(it, path),
@@ -5352,8 +5055,6 @@ impl Sink for ASink {
             ASink::OrStvSink(s) => s.finalize(it),
             ASink::TotalEvidenceMpSink(s) => s.finalize(it),
             ASink::CountSink(s) => s.finalize(it),
-            ASink::OrderedCollectSink(s) => s.finalize(it),
-            ASink::VectorFloatSumSink(s) => s.finalize(it),
             ASink::HashSink(s) => s.finalize(it),
             ASink::SumSink(s) => s.finalize(it),
             ASink::AndSink(s) => s.finalize(it),
