@@ -26,7 +26,7 @@ impl_raw_number_symbol!(
 );
 
 impl PureNumberSymbol for f64 {
-    fn symbol_bytes(self) -> Vec<u8> { binary_f64_symbol(self).to_vec() }
+    fn symbol_bytes(self) -> Vec<u8> { binary_f64_symbol(self) }
 }
 
 fn pure_number_symbol<T: PureNumberSymbol>(value: T) -> Vec<u8> {

@@ -103,11 +103,19 @@ pub enum Tag {
 pub const BINARY_F64_MARKER: u8 = 0xff;
 
 #[inline]
-pub fn binary_f64_symbol(value: f64) -> [u8; 9] {
-    let mut out = [0u8; 9];
-    out[0] = BINARY_F64_MARKER;
-    out[1..].copy_from_slice(&value.to_be_bytes());
-    out
+pub fn binary_f64_symbol(value: f64) -> Vec<u8> {
+    let raw = value.to_be_bytes();
+    let ambiguous_text = std::str::from_utf8(&raw).is_ok()
+        && (raw.iter().all(|byte| !byte.is_ascii_control())
+            || (raw.first() == Some(&b'"') && raw.last() == Some(&b'"')));
+    if ambiguous_text {
+        let mut out = Vec::with_capacity(9);
+        out.push(BINARY_F64_MARKER);
+        out.extend_from_slice(&raw);
+        out
+    } else {
+        raw.to_vec()
+    }
 }
 
 #[inline]
