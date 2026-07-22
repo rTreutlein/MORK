@@ -1785,6 +1785,7 @@ fn all_scheduled_ctv_proof_rows(rows: &BTreeSet<ProofRow>) -> bool {
 struct BaseRateGroup {
     fact_stvs_by_old: BTreeMap<Vec<u8>, Vec<(f64, f64)>>,
     guarded_proofs_by_old: BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
+    contribution_stvs_by_old: BTreeMap<Vec<u8>, BTreeSet<Vec<u8>>>,
 }
 
 /// Maintains `(base-rate $patQ $stv)` facts from `(fold-base-rate $patQ $old $stv)`
@@ -1800,6 +1801,186 @@ struct BaseRateGroup {
 pub struct BaseRateSink {
     groups: BTreeMap<Vec<u8>, BaseRateGroup>,
     skipped_rows: bool,
+}
+
+#[derive(Clone)]
+struct ContributionObservation {
+    value: Vec<u8>,
+    weight: Vec<u8>,
+    proof: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct ContributionUpdate {
+    identity: Vec<u8>,
+    old: Option<ContributionObservation>,
+    new: Option<ContributionObservation>,
+}
+
+struct ContributionGroup {
+    target: Vec<u8>,
+    old_state: Vec<u8>,
+    old_stv: Option<Vec<u8>>,
+    current_stvs: BTreeSet<Vec<u8>>,
+    updates: BTreeMap<Vec<u8>, ContributionUpdate>,
+}
+
+/// Atomically maintains a weighted fold from identity-keyed contributions.
+///
+/// Input rows are `(update-contribution $target $identity $old $new $state
+/// $stored-stv $current-stv)`. `$target` is an expression such as
+/// `(base-rate $pattern)` or
+/// `(fact $cache-key)`; the sink appends the computed STV to it. Observations
+/// are `no-observation` or `(observation $value $weight $proof)`. Durable state
+/// consists of one observation per identity plus `(contribution-state ...)`.
+pub struct ContributionSink {
+    groups: BTreeMap<Vec<u8>, ContributionGroup>,
+}
+
+fn parse_contribution_observation(bytes: &[u8]) -> Option<ContributionObservation> {
+    if is_symbol(bytes, "no-observation") {
+        return None;
+    }
+    let args = expr_args(bytes);
+    assert_eq!(args.len(), 4, "observation expects value, weight, and proof");
+    assert_eq!(symbol_str(args[0]), "observation");
+    Some(ContributionObservation {
+        value: args[1].to_vec(),
+        weight: args[2].to_vec(),
+        proof: args[3].to_vec(),
+    })
+}
+
+fn append_expr_arg(expr: &[u8], arg: &[u8]) -> Vec<u8> {
+    let mut args = expr_args(expr);
+    args.push(arg);
+    let mut out = Vec::new();
+    push_raw_expr(&mut out, &args);
+    out
+}
+
+fn contribution_observation_atom(target: &[u8], identity: &[u8], observation: &ContributionObservation) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_expr(&mut out, "contribution-observation", &[
+        target, identity, &observation.value, &observation.weight, &observation.proof,
+    ]);
+    out
+}
+
+fn contribution_state_atom(target: &[u8], state: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_expr(&mut out, "contribution-state", &[target, state]);
+    out
+}
+
+fn contribution_value_atom(target: &[u8], stv: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_expr(&mut out, "contribution-value", &[target, stv]);
+    out
+}
+
+impl Sink for ContributionSink {
+    fn new(_e: Expr) -> Self {
+        ContributionSink { groups: BTreeMap::new() }
+    }
+    fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
+        std::iter::once(WriteResourceRequest::BTM([].as_slice()))
+    }
+    fn sink<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(&mut self, mut it: It, path: &[u8]) where 'a: 'w, 'k: 'w {
+        let WriteResource::BTM(wz) = it.next().unwrap() else { unreachable!() };
+        let args = expr_args(&path[wz.root_prefix_path().len()..]);
+        assert_eq!(args.len(), 8, "update-contribution expects seven arguments");
+        assert_eq!(symbol_str(args[0]), "update-contribution");
+
+        let target = args[1].to_vec();
+        let identity = args[2].to_vec();
+        let old = parse_contribution_observation(args[3]);
+        let new = parse_contribution_observation(args[4]);
+        let old_state = args[5].to_vec();
+        let old_stv = if is_symbol(args[6], "no-evidence") { None } else { Some(args[6].to_vec()) };
+        let current_stv = if is_symbol(args[7], "no-evidence") { None } else { Some(args[7].to_vec()) };
+        let group = self.groups.entry(target.clone()).or_insert_with(|| ContributionGroup {
+            target,
+            old_state: old_state.clone(),
+            old_stv: old_stv.clone(),
+            current_stvs: BTreeSet::new(),
+            updates: BTreeMap::new(),
+        });
+        assert_eq!(group.old_state, old_state, "inconsistent contribution state");
+        assert_eq!(group.old_stv, old_stv, "inconsistent contribution target value");
+        if let Some(current_stv) = current_stv {
+            group.current_stvs.insert(current_stv);
+        }
+        group.updates.insert(identity.clone(), ContributionUpdate { identity, old, new });
+    }
+    fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(&mut self, mut it: It) -> bool where 'a: 'w, 'k: 'w {
+        let WriteResource::BTM(wz) = it.next().unwrap() else { unreachable!() };
+        wz.reset();
+        let mut remove = PathMap::new();
+        let mut add = PathMap::new();
+
+        for group in self.groups.values() {
+            let (mut weighted_sum, mut mass_sum) = stv_parts(&group.old_state);
+            let initial_mass = mass_sum;
+            let mut removed_mass = 0.0;
+            let mut new_values = Vec::new();
+            for update in group.updates.values() {
+                if let Some(old) = &update.old {
+                    let value = stv_f64(&old.value, "contribution value");
+                    let weight = stv_f64(&old.weight, "contribution weight");
+                    weighted_sum -= value * weight;
+                    mass_sum -= weight;
+                    removed_mass += weight;
+                    remove.insert(&contribution_observation_atom(&group.target, &update.identity, old), ());
+                }
+                if let Some(new) = &update.new {
+                    let value = stv_f64(&new.value, "contribution value");
+                    let weight = stv_f64(&new.weight, "contribution weight");
+                    weighted_sum += value * weight;
+                    mass_sum += weight;
+                    new_values.push(value);
+                    add.insert(&contribution_observation_atom(&group.target, &update.identity, new), ());
+                }
+            }
+            if weighted_sum.abs() < f64::EPSILON { weighted_sum = 0.0; }
+            if mass_sum.abs() < f64::EPSILON { mass_sum = 0.0; }
+            assert!(mass_sum >= 0.0, "contribution mass must not become negative");
+
+            remove.insert(&contribution_state_atom(&group.target, &group.old_state), ());
+            let new_state = stv_bytes(weighted_sum, mass_sum);
+            add.insert(&contribution_state_atom(&group.target, &new_state), ());
+            if let Some(old_stv) = &group.old_stv {
+                remove.insert(&append_expr_arg(&group.target, old_stv), ());
+                remove.insert(&contribution_value_atom(&group.target, old_stv), ());
+            }
+            for current_stv in &group.current_stvs {
+                remove.insert(&append_expr_arg(&group.target, current_stv), ());
+            }
+            if mass_sum > 0.0 {
+                let strength = if (initial_mass - removed_mass).abs() < f64::EPSILON && new_values.len() == 1 {
+                    new_values[0]
+                } else {
+                    weighted_sum / mass_sum
+                };
+                let new_stv = stv_bytes(strength, mass_sum / (mass_sum + 800.0));
+                add.insert(&append_expr_arg(&group.target, &new_stv), ());
+                add.insert(&contribution_value_atom(&group.target, &new_stv), ());
+            }
+        }
+
+        let removed = match wz.subtract_into(&remove.read_zipper(), true) {
+            AlgebraicStatus::Element => true,
+            AlgebraicStatus::Identity => false,
+            AlgebraicStatus::None => true,
+        };
+        wz.reset();
+        let added = match wz.join_into(&add.read_zipper()) {
+            AlgebraicStatus::Element => true,
+            AlgebraicStatus::Identity => false,
+            AlgebraicStatus::None => true,
+        };
+        removed || added
+    }
 }
 
 impl Sink for BaseRateSink {
@@ -1831,17 +2012,32 @@ impl Sink for BaseRateSink {
         );
         assert_eq!(symbol_str(args[0]), "fold-base-rate");
         if args.len() == 5 {
-            let guard = expr_args(args[4]);
-            assert_eq!(guard.len(), 5, "base-rate-guard expects four arguments");
-            assert_eq!(symbol_str(guard[0]), "base-rate-guard");
-            let guard_kind = symbol_str(guard[1]);
+            let metadata = expr_args(args[4]);
+            if symbol_str(metadata[0]) == "base-rate-contribution-value" {
+                assert_eq!(metadata.len(), 2, "base-rate-contribution-value expects one argument");
+                let entry = self.groups.entry(args[1].to_vec()).or_default();
+                entry
+                    .fact_stvs_by_old
+                    .entry(args[2].to_vec())
+                    .or_default()
+                    .push(stv_parts(args[3]));
+                entry
+                    .contribution_stvs_by_old
+                    .entry(args[2].to_vec())
+                    .or_default()
+                    .insert(metadata[1].to_vec());
+                return;
+            }
+            assert_eq!(metadata.len(), 5, "base-rate-guard expects four arguments");
+            assert_eq!(symbol_str(metadata[0]), "base-rate-guard");
+            let guard_kind = symbol_str(metadata[1]);
             assert!(
                 guard_kind == "without-rule" || guard_kind == "without-rule-instance",
                 "unsupported base-rate recursion guard"
             );
             if evidence_contains_rule(
-                guard[4],
-                guard[2],
+                metadata[4],
+                metadata[2],
                 guard_kind == "without-rule-instance",
             ) {
                 self.skipped_rows = true;
@@ -1853,7 +2049,7 @@ impl Sink for BaseRateSink {
                 .guarded_proofs_by_old
                 .entry(args[2].to_vec())
                 .or_default()
-                .insert((args[3].to_vec(), guard[3].to_vec(), guard[4].to_vec()));
+                .insert((args[3].to_vec(), metadata[3].to_vec(), metadata[4].to_vec()));
             return;
         }
 
@@ -1931,6 +2127,14 @@ impl Sink for BaseRateSink {
             let mut new_fact = Vec::new();
             push_expr(&mut new_fact, "base-rate", &[pattern, &new[..]]);
             add.insert(&new_fact[..], ());
+            if let Some(stored_stvs) = group.contribution_stvs_by_old.get(old) {
+                let mut target = Vec::new();
+                push_expr(&mut target, "base-rate", &[pattern]);
+                for stored_stv in stored_stvs {
+                    remove.insert(&contribution_value_atom(&target, stored_stv), ());
+                }
+                add.insert(&contribution_value_atom(&target, &new), ());
+            }
         }
 
         let removed = match wz.subtract_into(&remove.read_zipper(), true) {
@@ -4588,6 +4792,7 @@ pub enum ASink {
     HeadSink(HeadTailSink<true>),
     TailSink(HeadTailSink<false>),
     ReviseProofsSink(ReviseProofsSink),
+    ContributionSink(ContributionSink),
     BaseRateSink(BaseRateSink),
     PriorRuleStvSink(PriorRuleStvSink),
     PairCountsSink(PairCountsSink),
@@ -4675,6 +4880,12 @@ impl Sink for ASink {
                 && *e.ptr.offset(14) == b's'
         } {
             ASink::ReviseProofsSink(ReviseProofsSink::new(e))
+        } else if cfg!(feature = "pln") && unsafe {
+            *e.ptr == item_byte(Tag::Arity(8))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(19))
+                && &*slice_from_raw_parts(e.ptr.offset(2), 19) == b"update-contribution"
+        } {
+            ASink::ContributionSink(ContributionSink::new(e))
         } else if cfg!(feature = "pln") && unsafe {
             (*e.ptr == item_byte(Tag::Arity(4)) || *e.ptr == item_byte(Tag::Arity(5)))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(14))
@@ -4883,6 +5094,11 @@ impl Sink for ASink {
                         yield i
                     }
                 }
+                ASink::ContributionSink(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
                 ASink::BaseRateSink(s) => {
                     for i in s.request().into_iter() {
                         yield i
@@ -5005,6 +5221,7 @@ impl Sink for ASink {
             ASink::HeadSink(s) => s.sink(it, path),
             ASink::TailSink(s) => s.sink(it, path),
             ASink::ReviseProofsSink(s) => s.sink(it, path),
+            ASink::ContributionSink(s) => s.sink(it, path),
             ASink::BaseRateSink(s) => s.sink(it, path),
             ASink::PriorRuleStvSink(s) => s.sink(it, path),
             ASink::PairCountsSink(s) => s.sink(it, path),
@@ -5047,6 +5264,7 @@ impl Sink for ASink {
             ASink::HeadSink(s) => s.finalize(it),
             ASink::TailSink(s) => s.finalize(it),
             ASink::ReviseProofsSink(s) => s.finalize(it),
+            ASink::ContributionSink(s) => s.finalize(it),
             ASink::BaseRateSink(s) => s.finalize(it),
             ASink::PriorRuleStvSink(s) => s.finalize(it),
             ASink::PairCountsSink(s) => s.finalize(it),

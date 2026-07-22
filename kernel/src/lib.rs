@@ -94,4 +94,53 @@ mod tests {
         assert!(output.contains("(seen b (three four))\n"), "{output}");
         assert!(!output.contains("(seen missing"), "{output}");
     }
+
+    #[test]
+    fn contribution_sink_replaces_one_identity_and_aggregate() {
+        let mut space = Space::new();
+        space.add_all_sexpr(br#"
+            (fact cache (0.0 0.0))
+            (contribution-state (fact cache) (0.0 0.0))
+            (contribution-value (fact cache) (0.0 0.0))
+            (pending a 0.8 0.5 proof-a)
+            (exec 0
+                (, (pending $id $value $weight $proof)
+                   (contribution-state (fact cache) $state)
+                   (contribution-value (fact cache) $old-stv))
+                (O
+                    (- (pending $id $value $weight $proof))
+                    (update-contribution
+                        (fact cache) $id no-observation
+                        (observation $value $weight $proof)
+                        $state $old-stv $old-stv)))
+        "#).unwrap();
+
+        assert_eq!(space.metta_calculus(2), 1);
+        space.add_all_sexpr(br#"
+            (replacement a 0.6 0.75 proof-b)
+            (exec 0
+                (, (replacement $id $value $weight $proof)
+                   (contribution-state (fact cache) $state)
+                   (contribution-value (fact cache) $old-stv)
+                   (contribution-observation
+                       (fact cache) $id $old-value $old-weight $old-proof))
+                (O
+                    (- (replacement $id $value $weight $proof))
+                    (update-contribution
+                        (fact cache) $id
+                        (observation $old-value $old-weight $old-proof)
+                        (observation $value $weight $proof)
+                        $state $old-stv $old-stv)))
+        "#).unwrap();
+        assert_eq!(space.metta_calculus(2), 1);
+
+        let mut output = Vec::new();
+        space.dump_all_sexpr(&mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("(contribution-observation (fact cache) a 0.6 0.75 proof-b)\n"), "{output}");
+        assert!(!output.contains("proof-a"), "{output}");
+        assert!(output.contains("(fact cache (0.6 "), "{output}");
+        assert_eq!(output.matches("(contribution-state (fact cache)").count(), 1, "{output}");
+        assert_eq!(output.matches("(contribution-value (fact cache)").count(), 1, "{output}");
+    }
 }
