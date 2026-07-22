@@ -7,8 +7,8 @@ use futures::StreamExt;
 use log::*;
 use mork_expr::macros::SerializableExpr;
 use mork_expr::{
-    Expr, ExprEnv, ExprZipper, ExtractFailure, Tag, UnificationFailure, apply, byte_item, destruct,
-    item_byte, parse, serialize, traverseh, unify,
+    binary_f64_symbol, tagged_binary_f64, Expr, ExprEnv, ExprZipper, ExtractFailure, Tag,
+    UnificationFailure, apply, byte_item, destruct, item_byte, parse, serialize, traverseh, unify,
 };
 use mork_frontend::bytestring_parser::{Context, Parser, ParserError};
 use mork_frontend::json_parser::Transcriber;
@@ -755,6 +755,9 @@ fn try_f64_bytes(bytes: &[u8]) -> Option<f64> {
             return value.is_finite().then_some(if value == 0.0 { 0.0 } else { value });
         }
     }
+    if let Some(value) = tagged_binary_f64(bytes) {
+        return value.is_finite().then_some(if value == 0.0 { 0.0 } else { value });
+    }
     let value = f64::from_be_bytes(bytes.try_into().ok()?);
     value.is_finite().then_some(if value == 0.0 { 0.0 } else { value })
 }
@@ -762,8 +765,9 @@ fn try_f64_bytes(bytes: &[u8]) -> Option<f64> {
 fn binary_f64_bytes(value: f64, field: &str) -> Vec<u8> {
     assert!(value.is_finite(), "{field} must be finite");
     let value = if value == 0.0 { 0.0 } else { value };
-    let mut out = vec![item_byte(Tag::SymbolSize(8))];
-    out.extend_from_slice(&value.to_be_bytes());
+    let payload = binary_f64_symbol(value);
+    let mut out = vec![item_byte(Tag::SymbolSize(payload.len() as u8))];
+    out.extend_from_slice(&payload);
     out
 }
 

@@ -14,7 +14,7 @@ use std::task::Poll;
 use std::time::Instant;
 use futures::StreamExt;
 use pathmap::ring::{AlgebraicStatus, Lattice};
-use mork_expr::{byte_item, Expr, ExprZipper, ExtractFailure, item_byte, parse, serialize, Tag, traverseh, ExprEnv, unify, UnificationFailure, apply, destruct, OwnedSourceItem};
+use mork_expr::{byte_item, tagged_binary_f64, Expr, ExprZipper, ExtractFailure, item_byte, parse, serialize, Tag, traverseh, ExprEnv, unify, UnificationFailure, apply, destruct, OwnedSourceItem};
 use mork_frontend::bytestring_parser::{Parser, ParserError, Context};
 use mork_interning::{WritePermit, SharedMapping, SharedMappingHandle};
 use pathmap::utils::{BitMask, ByteMask};
@@ -34,6 +34,11 @@ pub static mut writes: usize = 0;
 
 #[cfg(not(feature = "interning"))]
 fn write_printable_symbol<W: Write>(out: &mut W, symbol: &[u8]) {
+    if let Some(value) = tagged_binary_f64(symbol) {
+        let value = if value == 0.0 { 0.0 } else { value };
+        let _ = write!(out, "{value:?}");
+        return;
+    }
     let textual = std::str::from_utf8(symbol).is_ok()
         && (symbol.iter().all(|byte| !byte.is_ascii_control())
             || (symbol.first() == Some(&b'"') && symbol.last() == Some(&b'"')));
@@ -1815,5 +1820,28 @@ impl Drop for Space {
             // z3.terminate();
             drop(z3.stdin.take())
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "interning")))]
+mod tests {
+    use super::write_printable_symbol;
+    use mork_expr::binary_f64_symbol;
+
+    #[test]
+    fn tagged_binary_float_serializes_as_decimal_even_when_payload_is_utf8() {
+        let value = f64::from_be_bytes([0x3f, 0xc2, 0xa2, 0xc2, 0xa2, 0xc2, 0xa2, 0x41]);
+        assert!(std::str::from_utf8(&value.to_be_bytes()).is_ok());
+        let mut output = Vec::new();
+        write_printable_symbol(&mut output, &binary_f64_symbol(value));
+        let decoded = std::str::from_utf8(&output).unwrap().parse::<f64>().unwrap();
+        assert_eq!(decoded.to_bits(), value.to_bits());
+    }
+
+    #[test]
+    fn eight_byte_text_symbol_remains_text() {
+        let mut output = Vec::new();
+        write_printable_symbol(&mut output, b"abcdefgh");
+        assert_eq!(output, b"abcdefgh");
     }
 }

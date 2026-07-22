@@ -257,7 +257,8 @@ impl DeserializableExpr for f64 {
             if let Ok(text) = str::from_utf8(bytes) {
                 if text.parse::<f64>().is_ok() { return true }
             }
-            size as usize == core::mem::size_of::<f64>()
+            crate::tagged_binary_f64(bytes).is_some()
+                || size as usize == core::mem::size_of::<f64>()
         }
     }
 
@@ -269,6 +270,7 @@ impl DeserializableExpr for f64 {
             if let Ok(text) = str::from_utf8(bytes) {
                 if let Ok(value) = text.parse::<f64>() { return value }
             }
+            if let Some(value) = crate::tagged_binary_f64(bytes) { return value }
             f64::from_be_bytes(bytes.try_into().unwrap_unchecked())
         }
     }
@@ -478,7 +480,21 @@ macro_rules! apply_e_clears_stacks_and_cycles_check {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Tag, Expr, parse, construct, destruct};
+    use crate::{binary_f64_symbol, item_byte, Tag, Expr, parse, construct, destruct};
+
+    #[test]
+    fn test_tagged_binary_f64_deserialization() {
+        let expected = f64::from_be_bytes([0x3f, 0xc2, 0xa2, 0xc2, 0xa2, 0xc2, 0xa2, 0x41]);
+        let payload = binary_f64_symbol(expected);
+        let mut buf = vec![item_byte(Tag::SymbolSize(payload.len() as u8))];
+        buf.extend_from_slice(&payload);
+        let expr = Expr { ptr: buf.as_mut_ptr() };
+        destruct!(
+            expr, {actual:f64},
+            assert_eq!(actual.to_bits(), expected.to_bits()),
+            err => panic!("failed {err:?}")
+        );
+    }
 
     #[test]
     fn test_parse_simple() {

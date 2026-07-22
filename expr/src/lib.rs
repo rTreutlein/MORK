@@ -97,6 +97,27 @@ pub enum Tag {
     // U64,
 }
 
+/// Marker used inside a symbol payload to distinguish an IEEE-754 `f64` from
+/// arbitrary eight-byte symbol text.  Older runtime values used the raw eight
+/// bytes directly, which is ambiguous whenever those bytes also form UTF-8.
+pub const BINARY_F64_MARKER: u8 = 0xff;
+
+#[inline]
+pub fn binary_f64_symbol(value: f64) -> [u8; 9] {
+    let mut out = [0u8; 9];
+    out[0] = BINARY_F64_MARKER;
+    out[1..].copy_from_slice(&value.to_be_bytes());
+    out
+}
+
+#[inline]
+pub fn tagged_binary_f64(bytes: &[u8]) -> Option<f64> {
+    if bytes.len() != 9 || bytes[0] != BINARY_F64_MARKER {
+        return None;
+    }
+    Some(f64::from_be_bytes(bytes[1..].try_into().ok()?))
+}
+
 // [2] <u64> '8 0 0 0 1 2
 // [2] shortStr '19 a d a ...
 

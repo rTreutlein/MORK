@@ -3,9 +3,35 @@ use eval::{EvalScope, FuncType};
 use eval_ffi::{EvalError, ExprSink, ExprSource, Tag};
 use hex;
 use log::trace;
-use mork_expr::{SourceItem, byte_item, item_byte};
+use mork_expr::{binary_f64_symbol, tagged_binary_f64, SourceItem, byte_item, item_byte};
 use std::io::Write;
 use std::ops::Div;
+
+trait PureNumberSymbol {
+    fn symbol_bytes(self) -> Vec<u8>;
+}
+
+macro_rules! impl_raw_number_symbol {
+    ($($t:ty),+ $(,)?) => {
+        $(impl PureNumberSymbol for $t {
+            fn symbol_bytes(self) -> Vec<u8> { self.to_be_bytes().to_vec() }
+        })+
+    };
+}
+
+impl_raw_number_symbol!(
+    u8, u16, u32, u64, u128, usize,
+    i8, i16, i32, i64, i128,
+    f32,
+);
+
+impl PureNumberSymbol for f64 {
+    fn symbol_bytes(self) -> Vec<u8> { binary_f64_symbol(self).to_vec() }
+}
+
+fn pure_number_symbol<T: PureNumberSymbol>(value: T) -> Vec<u8> {
+    value.symbol_bytes()
+}
 
 macro_rules! op {
     (num nary $name:ident($initial:expr, $t:ident: $tt:ty, $x:ident: $tx:ty) => $e:expr) => {
@@ -21,7 +47,8 @@ macro_rules! op {
                 let $x = expr.consume::<$tx>()?;
                 $t = $e;
             }
-            sink.write(SourceItem::Symbol(($t).to_be_bytes()[..].into()))?;
+            let output = pure_number_symbol($t);
+            sink.write(SourceItem::Symbol(output.as_slice().into()))?;
             Ok(())
         }
     };
@@ -43,7 +70,8 @@ macro_rules! op {
             let $y = expr.consume::<$ty>()?;
             let $z = expr.consume::<$tz>()?;
             let $w = expr.consume::<$tw>()?;
-            sink.write(SourceItem::Symbol(($e).to_be_bytes()[..].into()))?;
+            let output = pure_number_symbol($e);
+            sink.write(SourceItem::Symbol(output.as_slice().into()))?;
             Ok(())
         }
     };
@@ -64,7 +92,8 @@ macro_rules! op {
             let $x = expr.consume::<$tx>()?;
             let $y = expr.consume::<$ty>()?;
             let $z = expr.consume::<$tz>()?;
-            sink.write(SourceItem::Symbol(($e).to_be_bytes()[..].into()))?;
+            let output = pure_number_symbol($e);
+            sink.write(SourceItem::Symbol(output.as_slice().into()))?;
             Ok(())
         }
     };
@@ -84,7 +113,8 @@ macro_rules! op {
             }
             let $x = expr.consume::<$tx>()?;
             let $y = expr.consume::<$ty>()?;
-            sink.write(SourceItem::Symbol(($e).to_be_bytes()[..].into()))?;
+            let output = pure_number_symbol($e);
+            sink.write(SourceItem::Symbol(output.as_slice().into()))?;
             Ok(())
         }
     };
@@ -103,7 +133,8 @@ macro_rules! op {
                 )));
             }
             let $x = expr.consume::<$tx>()?;
-            sink.write(SourceItem::Symbol(($e).to_be_bytes()[..].into()))?;
+            let output = pure_number_symbol($e);
+            sink.write(SourceItem::Symbol(output.as_slice().into()))?;
             Ok(())
         }
     };
@@ -121,7 +152,8 @@ macro_rules! op {
                     " takes no arguments"
                 )));
             }
-            sink.write(SourceItem::Symbol(($e).to_be_bytes()[..].into()))?;
+            let output = pure_number_symbol($e);
+            sink.write(SourceItem::Symbol(output.as_slice().into()))?;
             Ok(())
         }
     };
@@ -147,7 +179,8 @@ macro_rules! op {
                 .map_err(|_| {
                     EvalError::from(concat!("string not a valid type in ", stringify!($name)))
                 })?;
-            sink.write(SourceItem::Symbol(result.to_be_bytes()[..].into()))?;
+            let output = pure_number_symbol(result);
+            sink.write(SourceItem::Symbol(output.as_slice().into()))?;
             Ok(())
         }
     };
@@ -836,9 +869,8 @@ pub extern "C" fn pln_mp_confidence_f64(
     let bc_a = expr.consume::<f64>()?;
     let bs_na = expr.consume::<f64>()?;
     let bc_na = expr.consume::<f64>()?;
-    sink.write(SourceItem::Symbol(
-        pln_mp_confidence(as_, ac, bs_a, bc_a, bs_na, bc_na).to_be_bytes()[..].into(),
-    ))?;
+    let output = pure_number_symbol(pln_mp_confidence(as_, ac, bs_a, bc_a, bs_na, bc_na));
+    sink.write(SourceItem::Symbol(output.as_slice().into()))?;
     Ok(())
 }
 
@@ -889,9 +921,8 @@ pub extern "C" fn pln_inv_confidence_f64(
     let cb = expr.consume::<f64>()?;
     let sb_a = expr.consume::<f64>()?;
     let cb_a = expr.consume::<f64>()?;
-    sink.write(SourceItem::Symbol(
-        pln_inv_confidence(sa, ca, sb, cb, sb_a, cb_a).to_be_bytes()[..].into(),
-    ))?;
+    let output = pure_number_symbol(pln_inv_confidence(sa, ca, sb, cb, sb_a, cb_a));
+    sink.write(SourceItem::Symbol(output.as_slice().into()))?;
     Ok(())
 }
 
@@ -934,9 +965,8 @@ pub extern "C" fn pln_inversion_valid_f64(
     let sb = expr.consume::<f64>()?;
     let cb = expr.consume::<f64>()?;
     let sb_a = expr.consume::<f64>()?;
-    sink.write(SourceItem::Symbol(
-        pln_inversion_valid(sa, ca, sb, cb, sb_a).to_be_bytes()[..].into(),
-    ))?;
+    let output = pure_number_symbol(pln_inversion_valid(sa, ca, sb, cb, sb_a));
+    sink.write(SourceItem::Symbol(output.as_slice().into()))?;
     Ok(())
 }
 
@@ -956,9 +986,8 @@ pub extern "C" fn pln_and_confidence_f64(
     let c1 = expr.consume::<f64>()?;
     let s2 = expr.consume::<f64>()?;
     let c2 = expr.consume::<f64>()?;
-    sink.write(SourceItem::Symbol(
-        pln_and_confidence(s1, c1, s2, c2).to_be_bytes()[..].into(),
-    ))?;
+    let output = pure_number_symbol(pln_and_confidence(s1, c1, s2, c2));
+    sink.write(SourceItem::Symbol(output.as_slice().into()))?;
     Ok(())
 }
 
@@ -1039,6 +1068,9 @@ fn pool_symbol_f64(bytes: &[u8]) -> Option<f64> {
             return value.is_finite().then_some(if value == 0.0 { 0.0 } else { value });
         }
     }
+    if let Some(value) = tagged_binary_f64(bytes) {
+        return value.is_finite().then_some(if value == 0.0 { 0.0 } else { value });
+    }
     let value = f64::from_be_bytes(bytes.try_into().ok()?);
     value.is_finite().then_some(if value == 0.0 { 0.0 } else { value })
 }
@@ -1048,10 +1080,12 @@ fn pool_stv_bytes(strength: f64, confidence: f64) -> Vec<u8> {
     assert!(confidence.is_finite(), "confidence must be finite");
     let strength = if strength == 0.0 { 0.0 } else { strength };
     let confidence = if confidence == 0.0 { 0.0 } else { confidence };
-    let mut strength_s = vec![item_byte(Tag::SymbolSize(8))];
-    strength_s.extend_from_slice(&strength.to_be_bytes());
-    let mut confidence_s = vec![item_byte(Tag::SymbolSize(8))];
-    confidence_s.extend_from_slice(&confidence.to_be_bytes());
+    let strength_payload = binary_f64_symbol(strength);
+    let confidence_payload = binary_f64_symbol(confidence);
+    let mut strength_s = vec![item_byte(Tag::SymbolSize(strength_payload.len() as u8))];
+    strength_s.extend_from_slice(&strength_payload);
+    let mut confidence_s = vec![item_byte(Tag::SymbolSize(confidence_payload.len() as u8))];
+    confidence_s.extend_from_slice(&confidence_payload);
     let mut out = Vec::new();
     out.push(item_byte(Tag::Arity(2)));
     out.extend_from_slice(&strength_s);
