@@ -1,0 +1,147 @@
+//! Safe, string-oriented boundary for native applications embedding MORK.
+//!
+//! Parsing buffers and process-global execution counters remain internal to
+//! this module. Callers own one [`NativeSpace`] and never handle raw MORK
+//! expression pointers.
+
+use crate::space::{transitions, unifications, writes, ParDataParser, Space};
+use mork_expr::{Expr, ExprZipper};
+use mork_frontend::bytestring_parser::{Context, Parser};
+use std::sync::Mutex;
+use std::time::Instant;
+
+static EXECUTION_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExecutionStats {
+    pub steps: usize,
+    pub unifications: usize,
+    pub writes: usize,
+    pub transitions: usize,
+    pub elapsed_ns: u128,
+}
+
+pub struct NativeSpace {
+    space: Space,
+}
+
+impl Default for NativeSpace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NativeSpace {
+    pub fn new() -> Self {
+        Self {
+            space: Space::new(),
+        }
+    }
+
+    pub fn add_batch(&mut self, source: &[u8]) -> Result<usize, String> {
+        self.space.add_all_sexpr(source)
+    }
+
+    pub fn remove_batch(&mut self, source: &[u8]) -> Result<usize, String> {
+        self.space.remove_all_sexpr(source)
+    }
+
+    pub fn execute(&mut self, step_budget: usize) -> ExecutionStats {
+        let _guard = EXECUTION_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let before = unsafe { (unifications, writes, transitions) };
+        let started = Instant::now();
+        let steps = self.space.metta_calculus(step_budget);
+        let elapsed_ns = started.elapsed().as_nanos();
+        let after = unsafe { (unifications, writes, transitions) };
+        ExecutionStats {
+            steps,
+            unifications: after.0.saturating_sub(before.0),
+            writes: after.1.saturating_sub(before.1),
+            transitions: after.2.saturating_sub(before.2),
+            elapsed_ns,
+        }
+    }
+
+    /// Read only matches of `pattern`, rendering each with `template`.
+    ///
+    /// Both expressions are parsed in one variable context so variables in
+    /// the template refer to bindings introduced by the pattern.
+    pub fn read_matching(&self, pattern: &[u8], template: &[u8]) -> Result<Vec<u8>, String> {
+        let mut joined = Vec::with_capacity(pattern.len() + template.len() + 1);
+        joined.extend_from_slice(pattern);
+        joined.push(b' ');
+        joined.extend_from_slice(template);
+
+        let mut context = Context::new(&joined);
+        let symbols = self.space.sym_table();
+        let mut parser = ParDataParser::new(&symbols);
+        let capacity = joined.len().saturating_mul(8).max(4096);
+        let mut pattern_buf = vec![0_u8; capacity];
+        let mut template_buf = vec![0_u8; capacity];
+        let mut pattern_zipper = ExprZipper::new(Expr {
+            ptr: pattern_buf.as_mut_ptr(),
+        });
+        parser
+            .sexpr(&mut context, &mut pattern_zipper)
+            .map_err(|error| format!("{error:?}"))?;
+        let mut template_zipper = ExprZipper::new(Expr {
+            ptr: template_buf.as_mut_ptr(),
+        });
+        parser
+            .sexpr(&mut context, &mut template_zipper)
+            .map_err(|error| format!("{error:?}"))?;
+
+        let mut output = Vec::new();
+        self.space.dump_sexpr(
+            Expr {
+                ptr: pattern_buf.as_mut_ptr(),
+            },
+            Expr {
+                ptr: template_buf.as_mut_ptr(),
+            },
+            &mut output,
+        );
+        Ok(output)
+    }
+
+    pub fn dump_all(&self) -> Result<Vec<u8>, String> {
+        let mut output = Vec::new();
+        self.space.dump_all_sexpr(&mut output)?;
+        Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filtered_readback_shares_variable_bindings() {
+        let mut space = NativeSpace::new();
+        space.add_batch(b"(row a 1)\n(row b 2)").unwrap();
+
+        let output = space
+            .read_matching(b"(row $name $value)", b"(result $name $value)")
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("(result a 1)"), "{output}");
+        assert!(output.contains("(result b 2)"), "{output}");
+    }
+
+    #[test]
+    fn batch_removal_and_execution_stats_are_safe() {
+        let mut space = NativeSpace::new();
+        space
+            .add_batch(b"(seed a)\n(exec 0 (, (seed $x)) (O (+ (seen $x))))")
+            .unwrap();
+        let stats = space.execute(1);
+        assert_eq!(stats.steps, 1);
+        assert!(stats.transitions > 0);
+        space.remove_batch(b"(seed a)").unwrap();
+        let output = String::from_utf8(space.dump_all().unwrap()).unwrap();
+        assert!(!output.contains("(seed a)"), "{output}");
+        assert!(output.contains("(seen a)"), "{output}");
+    }
+}

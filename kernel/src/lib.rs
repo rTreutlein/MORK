@@ -5,6 +5,8 @@
 #![feature(more_float_constants)]
 
 pub mod space;
+#[cfg(feature = "pln")]
+pub mod native;
 mod sources;
 mod sinks;
 mod pure;
