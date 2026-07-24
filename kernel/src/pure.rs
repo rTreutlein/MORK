@@ -1181,7 +1181,8 @@ fn pool_projection_idx(proj_id: &[u8]) -> Option<&[u8]> {
 }
 
 fn pool_projection_info(evset: &[u8], prem_stv: &[u8]) -> Option<PoolProjection> {
-    for item in pool_evidence_items(evset) {
+    let evidence = pool_evidence_items(evset);
+    for item in &evidence {
         let args = pool_expr_args(&item);
         if args.len() == 5 && pool_is_symbol(args[0], "projection-ev") {
             let Some(idx) = pool_projection_idx(args[1]) else {
@@ -1190,6 +1191,21 @@ fn pool_projection_info(evset: &[u8], prem_stv: &[u8]) -> Option<PoolProjection>
             let Some(arity) = pool_and_arity(args[2]) else {
                 continue;
             };
+            // A revised fact can contain both a projection proof and an
+            // independent direct/derived proof. In that case its canonical TV
+            // already represents the revision and must be folded as an
+            // independent part. Only a projection whose fact evidence all
+            // points back to the same compound source may participate in the
+            // correlation pool.
+            let has_independent_fact = evidence.iter().any(|evidence_item| {
+                let evidence_args = pool_expr_args(evidence_item);
+                evidence_args.len() == 3
+                    && pool_is_symbol(evidence_args[0], "fact-ev")
+                    && evidence_args[2] != args[2]
+            });
+            if has_independent_fact {
+                return None;
+            }
             let marginal_stv = if let Some((s, c)) = pool_stv_parts(args[3]) {
                 pool_stv_bytes(s, pln_marginal_proj_confidence(s, c))
             } else {
