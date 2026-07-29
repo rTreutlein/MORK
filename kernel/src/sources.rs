@@ -341,6 +341,15 @@ impl CmpSource {
                 let present = cloned.remove(p).is_some();
                 trace!(target: "source", "!= enrolling (present {:?}) at {}", present, serialize(p));
                 ((cmp, map), Some(cloned.into_read_zipper(&[])))
+            } else if cmp == 2 {
+                let mut greater = PathMap::new();
+                for (candidate, ()) in map.iter() {
+                    if p < candidate.as_slice() {
+                        greater.insert(candidate, ());
+                    }
+                }
+                trace!(target: "source", "< enrolling {} paths after {}", greater.val_count(), serialize(p));
+                ((cmp, map), Some(greater.into_read_zipper(&[])))
             } else {
                 unreachable!()
             }
@@ -358,8 +367,10 @@ impl Source for CmpSource {
         } else if unsafe { *e.ptr.offset(2) == b'!' } {
             assert!(unsafe { *e.ptr.offset(3) == b'=' });
             1
+        } else if is_named_expr(e, b"<", 3) {
+            2
         } else {
-            // todo < <= #=
+            // todo <= #=
             panic!("comparator not implemented")
         };
         // trace!(target: "source", "cmp {cmp} source");
@@ -373,6 +384,7 @@ impl Source for CmpSource {
     fn source<'trie, 'path, It: Iterator<Item=Resource<'trie, 'path>>>(&self, mut it: It) -> AFactor<'trie, ()> where 'path : 'trie {
         static EQ_PREFIX: [u8; 4] = [item_byte(Tag::Arity(3)), item_byte(Tag::SymbolSize(2)), b'=', b'='];
         static NE_PREFIX: [u8; 4] = [item_byte(Tag::Arity(3)), item_byte(Tag::SymbolSize(2)), b'!', b'='];
+        static LT_PREFIX: [u8; 3] = [item_byte(Tag::Arity(3)), item_byte(Tag::SymbolSize(1)), b'<'];
         let Resource::BTM(rz) = it.next().unwrap() else { unreachable!() };
         let map = rz.try_make_map().unwrap();
         let rz = DependentProductZipperG::new_enroll(rz, (self.cmp, map),
@@ -380,7 +392,9 @@ impl Source for CmpSource {
         let rz = PrefixZipper::new(
             if self.cmp == 0 { &EQ_PREFIX[..] }
             else if self.cmp == 1 { &NE_PREFIX[..] }
-            else { unreachable!() }, rz);
+            else if self.cmp == 2 { &LT_PREFIX[..] }
+            else { unreachable!() },
+            rz);
         AFactor::CmpSource(rz)
     }
 }
@@ -436,6 +450,8 @@ impl Source for ASource {
             #[cfg(not(feature = "z3"))]
             panic!("MORK was not built with the z3 feature, yet trying to call {:?}", e);
         } else if unsafe { *e.ptr == item_byte(Tag::Arity(3)) && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(2)) && (*e.ptr.offset(2) == b'=' || *e.ptr.offset(2) == b'!') && *e.ptr.offset(3) == b'=' } {
+            ASource::CmpSource(CmpSource::new(e))
+        } else if is_named_expr(e, b"<", 3) {
             ASource::CmpSource(CmpSource::new(e))
         } else if is_named_expr(e, b"head", 3) {
             ASource::HeadSource(HeadTailSource::new(e))

@@ -671,6 +671,10 @@ pub struct ReviseProofsSink {
     groups: BTreeMap<Vec<u8>, ProofGroup>,
 }
 
+pub struct SimpleReviseProofsSink {
+    groups: BTreeMap<(Vec<u8>, Vec<u8>), BTreeSet<(Vec<u8>, Vec<u8>)>>,
+}
+
 fn symbol_bytes(s: &str) -> Vec<u8> {
     let mut out = vec![item_byte(Tag::SymbolSize(s.len() as u8))];
     out.extend_from_slice(s.as_bytes());
@@ -1600,6 +1604,43 @@ where
         }
     }
     proved
+}
+
+type SimpleProofEvidence = BTreeMap<
+    Vec<u8>,
+    BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, BTreeSet<Vec<u8>>>>,
+>;
+
+fn collect_simple_proof_evidence<Z>(
+    root: &Z,
+) -> SimpleProofEvidence
+where
+    Z: ZipperForking<()>,
+{
+    let prefix = expr_prefix("proof-evidence", 5, &[]);
+    let mut rz = root.fork_read_zipper();
+    if rz.descend_to_existing(&prefix) != prefix.len() {
+        return BTreeMap::new();
+    }
+    let mut evidence = SimpleProofEvidence::new();
+    while rz.to_next_val() {
+        let path = rz.origin_path();
+        if !matches!(byte_item(path[0]), Tag::Arity(_)) {
+            continue;
+        }
+        let args = expr_args(path);
+        if args.len() == 5 && is_symbol(args[0], "proof-evidence") {
+            evidence
+                .entry(args[1].to_vec())
+                .or_default()
+                .entry(args[2].to_vec())
+                .or_default()
+                .entry(args[3].to_vec())
+                .or_default()
+                .insert(args[4].to_vec());
+        }
+    }
+    evidence
 }
 
 fn eval_scheduled_proof_with(
@@ -3132,6 +3173,143 @@ impl Sink for TotalEvidenceMpSink {
             AlgebraicStatus::Identity => false,
             AlgebraicStatus::None => true,
         }
+    }
+}
+
+impl Sink for SimpleReviseProofsSink {
+    fn new(_e: Expr) -> Self {
+        SimpleReviseProofsSink {
+            groups: BTreeMap::new(),
+        }
+    }
+
+    fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
+        std::iter::once(WriteResourceRequest::BTM([].as_slice()))
+    }
+
+    fn sink<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+        path: &[u8],
+    ) where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        let mpath = &path[wz.root_prefix_path().len()..];
+        let args = expr_args(mpath);
+        assert_eq!(
+            args.len(),
+            5,
+            "revise-proofs-simple expects TYPE, GOAL, PROOF-ID, and STV"
+        );
+        assert_eq!(symbol_str(args[0]), "revise-proofs-simple");
+        self.groups
+            .entry((args[1].to_vec(), args[2].to_vec()))
+            .or_default()
+            .insert((args[3].to_vec(), args[4].to_vec()));
+    }
+
+    fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+    ) -> bool
+    where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        wz.reset();
+        let evidence = collect_simple_proof_evidence(wz);
+        let mut remove = PathMap::new();
+        let mut add = PathMap::new();
+
+        for ((proof_type, goal), rows) in &self.groups {
+            let mut merged: Option<(Vec<u8>, Vec<u8>)> = None;
+            let mut merged_evidence = BTreeSet::<Vec<u8>>::new();
+
+            for (proof, stv) in rows {
+                let mut open_proof = Vec::new();
+                push_expr(
+                    &mut open_proof,
+                    "open-proof",
+                    &[proof_type, goal, proof, stv],
+                );
+                remove.insert(&open_proof, ());
+
+                let mut proved = Vec::new();
+                push_expr(&mut proved, "proved", &[proof_type, goal, proof, stv]);
+                add.insert(&proved, ());
+
+                let row_evidence = evidence
+                    .get(proof_type.as_slice())
+                    .and_then(|goals| goals.get(goal.as_slice()))
+                    .and_then(|proofs| proofs.get(proof.as_slice()));
+
+                match &mut merged {
+                    None => {
+                        merged = Some((stv.clone(), proof.clone()));
+                        if let Some(row_evidence) = row_evidence {
+                            merged_evidence.extend(row_evidence.iter().cloned());
+                        }
+                    }
+                    Some((merged_stv, merged_proof))
+                        if row_evidence
+                            .is_none_or(|row_evidence| {
+                                row_evidence.is_disjoint(&merged_evidence)
+                            }) =>
+                    {
+                        let mut next_stv = Vec::new();
+                        push_expr(&mut next_stv, "merge", &[merged_stv, stv]);
+                        let mut next_proof = Vec::new();
+                        push_expr(&mut next_proof, "merge", &[merged_proof, proof]);
+                        *merged_stv = next_stv;
+                        *merged_proof = next_proof;
+                        if let Some(row_evidence) = row_evidence {
+                            merged_evidence.extend(row_evidence.iter().cloned());
+                        }
+                    }
+                    Some(_) => {}
+                }
+            }
+
+            if let Some((stv, proof)) = merged {
+                let mut revised = Vec::new();
+                push_expr(
+                    &mut revised,
+                    "revised",
+                    &[proof_type, goal, &stv, &proof],
+                );
+                add.insert(&revised, ());
+
+                for evidence in merged_evidence {
+                    let mut revised_evidence = Vec::new();
+                    push_expr(
+                        &mut revised_evidence,
+                        "revised-evidence",
+                        &[proof_type, goal, &evidence],
+                    );
+                    add.insert(&revised_evidence, ());
+                }
+            }
+        }
+
+        let removed = match wz.subtract_into(&remove.read_zipper(), true) {
+            AlgebraicStatus::Element => true,
+            AlgebraicStatus::Identity => false,
+            AlgebraicStatus::None => true,
+        };
+        wz.reset();
+        let added = match wz.join_into(&add.read_zipper()) {
+            AlgebraicStatus::Element => true,
+            AlgebraicStatus::Identity => false,
+            AlgebraicStatus::None => true,
+        };
+        removed || added
     }
 }
 
@@ -4795,6 +4973,7 @@ pub enum ASink {
     RemoveSink(RemoveSink),
     HeadSink(HeadTailSink<true>),
     TailSink(HeadTailSink<false>),
+    SimpleReviseProofsSink(SimpleReviseProofsSink),
     ReviseProofsSink(ReviseProofsSink),
     ContributionSink(ContributionSink),
     BaseRateSink(BaseRateSink),
@@ -4863,6 +5042,12 @@ impl Sink for ASink {
         } else if unsafe { *e.ptr == item_byte(Tag::Arity(3)) && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(4)) &&
             *e.ptr.offset(2) == b't' && *e.ptr.offset(3) == b'a' && *e.ptr.offset(4) == b'i' && *e.ptr.offset(5) == b'l' } {
             ASink::TailSink(HeadTailSink::new(e))
+        } else if unsafe {
+            *e.ptr == item_byte(Tag::Arity(5))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(20))
+                && &*slice_from_raw_parts(e.ptr.offset(2), 20) == b"revise-proofs-simple"
+        } {
+            ASink::SimpleReviseProofsSink(SimpleReviseProofsSink::new(e))
         } else if cfg!(feature = "pln") && unsafe {
             (*e.ptr == item_byte(Tag::Arity(4))
                 || *e.ptr == item_byte(Tag::Arity(5))
@@ -5093,6 +5278,11 @@ impl Sink for ASink {
                         yield i
                     }
                 }
+                ASink::SimpleReviseProofsSink(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
                 ASink::ReviseProofsSink(s) => {
                     for i in s.request().into_iter() {
                         yield i
@@ -5224,6 +5414,7 @@ impl Sink for ASink {
             ASink::RemoveSink(s) => s.sink(it, path),
             ASink::HeadSink(s) => s.sink(it, path),
             ASink::TailSink(s) => s.sink(it, path),
+            ASink::SimpleReviseProofsSink(s) => s.sink(it, path),
             ASink::ReviseProofsSink(s) => s.sink(it, path),
             ASink::ContributionSink(s) => s.sink(it, path),
             ASink::BaseRateSink(s) => s.sink(it, path),
@@ -5267,6 +5458,7 @@ impl Sink for ASink {
             ASink::RemoveSink(s) => s.finalize(it),
             ASink::HeadSink(s) => s.finalize(it),
             ASink::TailSink(s) => s.finalize(it),
+            ASink::SimpleReviseProofsSink(s) => s.finalize(it),
             ASink::ReviseProofsSink(s) => s.finalize(it),
             ASink::ContributionSink(s) => s.finalize(it),
             ASink::BaseRateSink(s) => s.finalize(it),
