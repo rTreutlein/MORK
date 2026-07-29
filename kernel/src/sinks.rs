@@ -1022,32 +1022,6 @@ fn inversion_proof_parts(proof_id: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
     None
 }
 
-fn is_scoped_inheritance_goal(goal: &[u8]) -> bool {
-    if !matches!(byte_item(goal[0]), Tag::Arity(_)) {
-        return false;
-    }
-    let scoped = expr_args(goal);
-    scoped.len() == 2 && is_expr_head(scoped[1], "Inheritance")
-}
-
-fn is_inheritance_cycle_proof(proof_id: &[u8]) -> bool {
-    if !matches!(byte_item(proof_id[0]), Tag::Arity(_)) {
-        return false;
-    }
-    let args = expr_args(proof_id);
-    if args.is_empty() {
-        return false;
-    }
-    if is_symbol(args[0], "scheduledInvN") && args.len() >= 2 {
-        return is_scoped_inheritance_goal(args[1]);
-    }
-    if is_symbol(args[0], "scheduledN") && args.len() >= 3 {
-        return is_scoped_inheritance_goal(args[1])
-            && (is_expr_head(args[2], "stv-prior") || is_expr_head(args[2], "inv"));
-    }
-    false
-}
-
 fn is_generated_inheritance_view_proof(proof_id: &[u8]) -> bool {
     if !matches!(byte_item(proof_id[0]), Tag::Arity(_)) {
         return false;
@@ -1343,7 +1317,6 @@ fn fact_evidence_key_depends_on(
         .get(key)
         .into_iter()
         .flat_map(|rows| rows.iter())
-        .filter(|(_stv, proof_id, _evset)| is_inheritance_cycle_proof(proof_id))
         .any(|(_stv, _proof_id, evset)| {
             evidence_depends_on_fact_with_stack(evset, fact, proved, stack)
         });
@@ -3409,20 +3382,36 @@ impl Sink for ReviseProofsSink {
                 .get(goal)
                 .cloned()
                 .unwrap_or_default();
+            let recursive_current_proofs: BTreeSet<_> = if group.old_facts.is_empty() {
+                BTreeSet::new()
+            } else {
+                let proved = proved_rows.as_ref().expect("proved rows were collected");
+                current_proofs
+                    .iter()
+                    .filter(|(_stv, _proof_id, evset)| {
+                        evidence_depends_on_fact(evset, goal, proved)
+                    })
+                    .cloned()
+                    .collect()
+            };
+            let acyclic_current_proofs: BTreeSet<_> = current_proofs
+                .difference(&recursive_current_proofs)
+                .cloned()
+                .collect();
             // Generated inheritance views remain backward proof alternatives,
             // but they do not revise a primary asserted/ordinary positive
             // proof into a different canonical forward premise. A refutation
             // is different: it must still revise with a generated positive
             // view (Flying Raven's Penguin counter-evidence), independent of
             // which proof happens to reach this sink first.
-            let has_primary_positive_proof = current_proofs
+            let has_primary_positive_proof = acyclic_current_proofs
                 .iter()
                 .chain(existing_goal_proofs.iter())
                 .any(|(_stv, proof_id, _evset)| {
                     !is_generated_inheritance_view_proof(proof_id)
                         && !is_inheritance_refutation_proof(proof_id)
                 });
-            let canonical_current_proofs: BTreeSet<_> = current_proofs
+            let canonical_current_proofs: BTreeSet<_> = acyclic_current_proofs
                 .iter()
                 .filter(|(_stv, proof_id, _evset)| {
                     !has_primary_positive_proof || !is_generated_inheritance_view_proof(proof_id)
@@ -3516,6 +3505,10 @@ impl Sink for ReviseProofsSink {
                     }
                 }
 
+                if recursive_current_proofs.contains(&current) {
+                    continue;
+                }
+
                 let mut proved = Vec::new();
                 push_expr(&mut proved, "proved", &[goal, stv, proof_id, evset]);
                 add.insert(&proved[..], ());
@@ -3552,16 +3545,7 @@ impl Sink for ReviseProofsSink {
                 }
 
                 if factored.is_none() && canonical_current_proofs.contains(&current) {
-                    let depends_on_goal = if group.old_facts.is_empty() {
-                        false
-                    } else {
-                        let proved = proved_rows.get_or_insert_with(|| collect_proved_rows(wz));
-                        evidence_depends_on_fact(evset, goal, proved)
-                    };
                     merged = Some(match merged {
-                        Some((ref old_stv, ref old_ev)) if depends_on_goal => {
-                            (old_stv.clone(), old_ev.clone())
-                        }
                         Some((ref old_stv, ref old_ev))
                             if is_inversion_snapshot_proof(proof_id)
                                 && evidence_equal(old_ev, evset) =>
