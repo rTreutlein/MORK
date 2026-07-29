@@ -216,4 +216,55 @@ mod tests {
         assert_eq!(output.matches("(contribution-state (fact cache)").count(), 1, "{output}");
         assert_eq!(output.matches("(contribution-value (fact cache)").count(), 1, "{output}");
     }
+
+    #[test]
+    fn schedule_rules_preserves_variables_shared_with_premises() {
+        let mut space = Space::new();
+        space.add_all_sexpr(br#"
+            (ruleN
+                (Pet $x)
+                pet-rule
+                (ctv (0.9 0.5) (0 1))
+                (pcons (Dog $x) pnil))
+            (, (Goal (Pet $answer)))
+            (fact (Dog fido))
+            (exec 0
+                (, (, (Goal $goal)))
+                (O (schedule-rules $goal)))
+            (exec 1
+                (, (pendingN
+                     $_priority $goal $_stv
+                     (pcons $premise pnil) $_evidence)
+                   (fact $premise))
+                (O (+ (scheduled-goal $goal))))
+        "#).unwrap();
+
+        assert_eq!(space.metta_calculus(2), 2);
+
+        let mut output = Vec::new();
+        space.dump_all_sexpr(&mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("(scheduled-goal (Pet fido))\n"), "{output}");
+    }
+
+    #[test]
+    fn schedule_rules_leaves_goals_for_specialized_rule_fallbacks() {
+        let mut space = Space::new();
+        space.add_all_sexpr(br#"
+            (ruleN (Pet fido) ordinary (ctv (0.9 0.5) (0 1)) pnil)
+            (ruleN (Pet fido) projection (proj and) (pcons (Pets fido) pnil))
+            (, (Goal (Pet fido)))
+            (exec 0
+                (, (, (Goal $goal)))
+                (O (schedule-rules $goal)))
+        "#).unwrap();
+
+        assert_eq!(space.metta_calculus(1), 1);
+
+        let mut output = Vec::new();
+        space.dump_all_sexpr(&mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("(, (Goal (Pet fido)))\n"), "{output}");
+        assert!(output.contains("(pendingN "), "{output}");
+    }
 }

@@ -671,6 +671,10 @@ pub struct ReviseProofsSink {
     groups: BTreeMap<Vec<u8>, ProofGroup>,
 }
 
+pub struct ScheduleRulesSink {
+    goals: BTreeSet<Vec<u8>>,
+}
+
 pub struct SimpleReviseProofsSink {
     groups: BTreeMap<(Vec<u8>, Vec<u8>), BTreeSet<(Vec<u8>, Vec<u8>)>>,
 }
@@ -3599,6 +3603,208 @@ impl Sink for ReviseProofsSink {
     }
 }
 
+impl Sink for ScheduleRulesSink {
+    fn new(_e: Expr) -> Self {
+        Self {
+            goals: BTreeSet::new(),
+        }
+    }
+
+    fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
+        std::iter::once(WriteResourceRequest::BTM([].as_slice()))
+    }
+
+    fn sink<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+        path: &[u8],
+    ) where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        let args = expr_args(&path[wz.root_prefix_path().len()..]);
+        assert_eq!(args.len(), 2, "schedule-rules expects one goal");
+        assert_eq!(symbol_str(args[0]), "schedule-rules");
+        self.goals.insert(args[1].to_vec());
+    }
+
+    fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+    ) -> bool
+    where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        wz.reset();
+        let mut remove = PathMap::new();
+        let mut add = PathMap::new();
+
+        for goal in &self.goals {
+            if !matches!(byte_item(goal[0]), Tag::Arity(_)) {
+                continue;
+            }
+            let goal_args = expr_args(goal);
+            let Some(goal_head) = goal_args.first() else {
+                continue;
+            };
+            let has_goal_bucket = |name: &str, arity: u8| {
+                let base = expr_prefix(name, arity, &[]);
+                let mut exact = base.clone();
+                exact.push(goal[0]);
+                exact.extend_from_slice(goal_head);
+                let mut variable_goal = base.clone();
+                variable_goal.push(item_byte(Tag::NewVar));
+                let mut variable_head = base;
+                variable_head.push(goal[0]);
+                variable_head.push(item_byte(Tag::NewVar));
+                [exact, variable_goal, variable_head].iter().any(|prefix| {
+                    let mut rz = wz.fork_read_zipper();
+                    rz.descend_to_existing(prefix) == prefix.len()
+                })
+            };
+            let mut prefix = expr_prefix("ruleN", 5, &[]);
+            prefix.push(goal[0]);
+            prefix.extend_from_slice(goal_head);
+            let mut rz = wz.fork_read_zipper();
+            if rz.descend_to_existing(&prefix) != prefix.len() {
+                continue;
+            }
+
+            let mut matched = false;
+            let mut requires_fallback = has_goal_bucket("adapterN", 3)
+                || has_goal_bucket("adapterCanonicalN", 3)
+                || has_goal_bucket("adapterIntroductionN", 4)
+                || has_goal_bucket("adapterOrN", 3);
+            let rule_base = expr_prefix("ruleN", 5, &[]);
+            let mut variable_rule_goal = rule_base.clone();
+            variable_rule_goal.push(item_byte(Tag::NewVar));
+            let mut variable_rule_head = rule_base;
+            variable_rule_head.push(goal[0]);
+            variable_rule_head.push(item_byte(Tag::NewVar));
+            requires_fallback |= [&variable_rule_goal, &variable_rule_head]
+                .iter()
+                .any(|prefix| {
+                    let mut rz = wz.fork_read_zipper();
+                    rz.descend_to_existing(prefix) == prefix.len()
+                });
+            while rz.to_next_val() {
+                let path = rz.origin_path();
+                if !path.starts_with(&prefix) {
+                    break;
+                }
+                let rule_expr = Expr {
+                    ptr: path.as_ptr().cast_mut(),
+                };
+                let mut rule = Vec::new();
+                ExprEnv::new(0, rule_expr).args(&mut rule);
+                if rule.len() != 5
+                    || !is_symbol(
+                        unsafe { rule[0].subsexpr().span().as_ref().unwrap() },
+                        "ruleN",
+                    )
+                {
+                    continue;
+                }
+                let goal_expr = Expr {
+                    ptr: goal.as_ptr().cast_mut(),
+                };
+                let mut pairs = vec![(rule[1], ExprEnv::new(1, goal_expr))];
+                let Ok(bindings) = unify(&mut pairs) else {
+                    continue;
+                };
+                let apply_env = |env: ExprEnv| -> Option<Vec<u8>> {
+                    let mut output = Vec::new();
+                    let mut stack = Vec::new();
+                    let mut assignments = Vec::new();
+                    let (_, _, acyclic) =
+                        mork_expr::apply_e_clears_stacks_and_cycles_check!(
+                            env.n,
+                            env.v,
+                            0,
+                            env.subsexpr(),
+                            &bindings,
+                            output,
+                            stack,
+                            assignments
+                        );
+                    acyclic.then_some(output)
+                };
+                let Some(instantiated_rule) = apply_env(ExprEnv::new(0, rule_expr)) else {
+                    requires_fallback = true;
+                    continue;
+                };
+                let instantiated = expr_args(&instantiated_rule);
+                if instantiated.len() != 5 {
+                    requires_fallback = true;
+                    continue;
+                }
+                let rule_stv = expr_args(instantiated[3]);
+                if rule_stv.len() != 3 {
+                    requires_fallback = true;
+                    continue;
+                }
+                let stv = expr_args(rule_stv[1]);
+                if stv.len() != 2 {
+                    requires_fallback = true;
+                    continue;
+                }
+
+                let confidence = stv_f64(stv[1], "rule confidence");
+                let priority_text = hex::encode(binary_f64_symbol(1.0 - confidence));
+                let priority = symbol_bytes(&priority_text);
+                let mut rule_evidence = Vec::new();
+                push_expr(&mut rule_evidence, "rule-ev", &[instantiated[2]]);
+                let pnil = symbol_bytes("pnil");
+                let mut evidence = Vec::new();
+                push_expr(&mut evidence, "pcons", &[&rule_evidence, &pnil]);
+                let mut pending = Vec::new();
+                push_expr(
+                    &mut pending,
+                    "pendingN",
+                    &[
+                        &priority,
+                        instantiated[1],
+                        instantiated[3],
+                        instantiated[4],
+                        &evidence,
+                    ],
+                );
+                add.insert(&pending, ());
+                matched = true;
+            }
+
+            if matched && !requires_fallback {
+                let mut goal_atom = Vec::new();
+                push_expr(&mut goal_atom, "Goal", &[goal]);
+                let mut goal_token = Vec::new();
+                push_expr(&mut goal_token, ",", &[&goal_atom]);
+                remove.insert(&goal_token, ());
+            }
+        }
+
+        self.goals.clear();
+        let removed = match wz.subtract_into(&remove.read_zipper(), true) {
+            AlgebraicStatus::Element => true,
+            AlgebraicStatus::Identity => false,
+            AlgebraicStatus::None => true,
+        };
+        wz.reset();
+        let added = match wz.join_into(&add.read_zipper()) {
+            AlgebraicStatus::Element => true,
+            AlgebraicStatus::Identity => false,
+            AlgebraicStatus::None => true,
+        };
+        removed || added
+    }
+}
+
 #[cfg(feature = "wasm")]
 pub struct WASMSink {
     e: Expr,
@@ -4983,6 +5189,7 @@ pub enum ASink {
     TailSink(HeadTailSink<false>),
     SimpleReviseProofsSink(SimpleReviseProofsSink),
     ReviseProofsSink(ReviseProofsSink),
+    ScheduleRulesSink(ScheduleRulesSink),
     ContributionSink(ContributionSink),
     BaseRateSink(BaseRateSink),
     PriorRuleStvSink(PriorRuleStvSink),
@@ -5077,6 +5284,12 @@ impl Sink for ASink {
                 && *e.ptr.offset(14) == b's'
         } {
             ASink::ReviseProofsSink(ReviseProofsSink::new(e))
+        } else if cfg!(feature = "pln") && unsafe {
+            *e.ptr == item_byte(Tag::Arity(2))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(14))
+                && &*slice_from_raw_parts(e.ptr.offset(2), 14) == b"schedule-rules"
+        } {
+            ASink::ScheduleRulesSink(ScheduleRulesSink::new(e))
         } else if cfg!(feature = "pln") && unsafe {
             *e.ptr == item_byte(Tag::Arity(8))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(19))
@@ -5296,6 +5509,11 @@ impl Sink for ASink {
                         yield i
                     }
                 }
+                ASink::ScheduleRulesSink(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
                 ASink::ContributionSink(s) => {
                     for i in s.request().into_iter() {
                         yield i
@@ -5424,6 +5642,7 @@ impl Sink for ASink {
             ASink::TailSink(s) => s.sink(it, path),
             ASink::SimpleReviseProofsSink(s) => s.sink(it, path),
             ASink::ReviseProofsSink(s) => s.sink(it, path),
+            ASink::ScheduleRulesSink(s) => s.sink(it, path),
             ASink::ContributionSink(s) => s.sink(it, path),
             ASink::BaseRateSink(s) => s.sink(it, path),
             ASink::PriorRuleStvSink(s) => s.sink(it, path),
@@ -5468,6 +5687,7 @@ impl Sink for ASink {
             ASink::TailSink(s) => s.finalize(it),
             ASink::SimpleReviseProofsSink(s) => s.finalize(it),
             ASink::ReviseProofsSink(s) => s.finalize(it),
+            ASink::ScheduleRulesSink(s) => s.finalize(it),
             ASink::ContributionSink(s) => s.finalize(it),
             ASink::BaseRateSink(s) => s.finalize(it),
             ASink::PriorRuleStvSink(s) => s.finalize(it),
