@@ -873,6 +873,28 @@ pub extern "C" fn pln_mp_confidence_f64(
     Ok(())
 }
 
+pub extern "C" fn pln_mp_stv(
+    expr: *mut ExprSource,
+    sink: *mut ExprSink,
+) -> Result<(), EvalError> {
+    let expr = unsafe { &mut *expr };
+    let sink = unsafe { &mut *sink };
+    let items = expr.consume_head_check(b"pln_mp_stv")?;
+    if items != 6 {
+        return Err(EvalError::from("pln_mp_stv takes six arguments"));
+    }
+    let as_ = expr.consume::<f64>()?;
+    let ac = expr.consume::<f64>()?;
+    let bs_a = expr.consume::<f64>()?;
+    let bc_a = expr.consume::<f64>()?;
+    let bs_na = expr.consume::<f64>()?;
+    let bc_na = expr.consume::<f64>()?;
+    let strength = (bs_a * as_) + (bs_na * (1.0 - as_));
+    let confidence = pln_mp_confidence(as_, ac, bs_a, bc_a, bs_na, bc_na);
+    sink.extend_from_slice(&pool_stv_bytes(strength, confidence))?;
+    Ok(())
+}
+
 // PeTTaChainer tv_formulas.metta CTVInversionFormula helpers. The negative
 // branch reuses the same ops with complemented sb / sb_a arguments (ideal-var
 // is symmetric in s vs 1-s, so the variances come out identical to PeTTa's).
@@ -2101,6 +2123,7 @@ pub fn register(scope: &mut EvalScope) {
             pln_mp_confidence_f64,
             FuncType::Pure,
         );
+        scope.add_func("pln_mp_stv", pln_mp_stv, FuncType::Pure);
         scope.add_func("pln_inv_strength_f64", pln_inv_strength_f64, FuncType::Pure);
         scope.add_func(
             "pln_inv_confidence_f64",
