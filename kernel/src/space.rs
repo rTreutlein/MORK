@@ -31,6 +31,11 @@ use crate::sources::{AFactor, Resource, ResourceRequest};
 pub static mut transitions: usize = 0;
 pub static mut unifications: usize = 0;
 pub static mut writes: usize = 0;
+pub static mut fused_rule_candidates: usize = 0;
+pub static mut fused_rule_unifications: usize = 0;
+pub static mut fused_rule_rows: usize = 0;
+pub static mut head_source_candidates: usize = 0;
+pub static mut head_source_rows: usize = 0;
 
 #[cfg(not(feature = "interning"))]
 fn write_printable_symbol<W: Write>(out: &mut W, symbol: &[u8]) {

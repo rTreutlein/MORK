@@ -1,4 +1,6 @@
-use crate::space::ACT_PATH;
+use crate::space::{
+    ACT_PATH, fused_rule_candidates, fused_rule_rows, fused_rule_unifications,
+};
 use crate::{expr, pure};
 use core::f64;
 use eval::EvalScope;
@@ -3702,6 +3704,9 @@ impl Sink for ScheduleRulesSink {
                 let rule_expr = Expr {
                     ptr: path.as_ptr().cast_mut(),
                 };
+                unsafe {
+                    fused_rule_candidates += 1;
+                }
                 let mut rule = Vec::new();
                 ExprEnv::new(0, rule_expr).args(&mut rule);
                 if rule.len() != 5
@@ -3716,6 +3721,9 @@ impl Sink for ScheduleRulesSink {
                     ptr: goal.as_ptr().cast_mut(),
                 };
                 let mut pairs = vec![(rule[1], ExprEnv::new(1, goal_expr))];
+                unsafe {
+                    fused_rule_unifications += 1;
+                }
                 let Ok(bindings) = unify(&mut pairs) else {
                     continue;
                 };
@@ -3777,6 +3785,9 @@ impl Sink for ScheduleRulesSink {
                     ],
                 );
                 add.insert(&pending, ());
+                unsafe {
+                    fused_rule_rows += 1;
+                }
                 matched = true;
             }
 

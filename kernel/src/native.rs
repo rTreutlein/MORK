@@ -4,7 +4,10 @@
 //! this module. Callers own one [`NativeSpace`] and never handle raw MORK
 //! expression pointers.
 
-use crate::space::{transitions, unifications, writes, ParDataParser, Space};
+use crate::space::{
+    ParDataParser, Space, fused_rule_candidates, fused_rule_rows, fused_rule_unifications,
+    head_source_candidates, head_source_rows, transitions, unifications, writes,
+};
 use mork_expr::{Expr, ExprZipper};
 use mork_frontend::bytestring_parser::{Context, Parser};
 use std::sync::Mutex;
@@ -18,6 +21,11 @@ pub struct ExecutionStats {
     pub unifications: usize,
     pub writes: usize,
     pub transitions: usize,
+    pub fused_rule_candidates: usize,
+    pub fused_rule_unifications: usize,
+    pub fused_rule_rows: usize,
+    pub head_source_candidates: usize,
+    pub head_source_rows: usize,
     pub elapsed_ns: u128,
 }
 
@@ -46,20 +54,51 @@ impl NativeSpace {
         self.space.remove_all_sexpr(source)
     }
 
+    pub fn set_timing(&mut self, enabled: bool) {
+        self.space.timing = enabled;
+    }
+
     pub fn execute(&mut self, step_budget: usize) -> ExecutionStats {
         let _guard = EXECUTION_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let before = unsafe { (unifications, writes, transitions) };
+        let before = unsafe {
+            (
+                unifications,
+                writes,
+                transitions,
+                fused_rule_candidates,
+                fused_rule_unifications,
+                fused_rule_rows,
+                head_source_candidates,
+                head_source_rows,
+            )
+        };
         let started = Instant::now();
         let steps = self.space.metta_calculus(step_budget);
         let elapsed_ns = started.elapsed().as_nanos();
-        let after = unsafe { (unifications, writes, transitions) };
+        let after = unsafe {
+            (
+                unifications,
+                writes,
+                transitions,
+                fused_rule_candidates,
+                fused_rule_unifications,
+                fused_rule_rows,
+                head_source_candidates,
+                head_source_rows,
+            )
+        };
         ExecutionStats {
             steps,
             unifications: after.0.saturating_sub(before.0),
             writes: after.1.saturating_sub(before.1),
             transitions: after.2.saturating_sub(before.2),
+            fused_rule_candidates: after.3.saturating_sub(before.3),
+            fused_rule_unifications: after.4.saturating_sub(before.4),
+            fused_rule_rows: after.5.saturating_sub(before.5),
+            head_source_candidates: after.6.saturating_sub(before.6),
+            head_source_rows: after.7.saturating_sub(before.7),
             elapsed_ns,
         }
     }
