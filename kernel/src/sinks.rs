@@ -3647,6 +3647,16 @@ impl Sink for ScheduleRulesSink {
         wz.reset();
         let mut remove = PathMap::new();
         let mut add = PathMap::new();
+        let mut rule = Vec::with_capacity(5);
+        let mut pairs = Vec::with_capacity(1);
+        let mut instantiated_rule = Vec::new();
+        let mut apply_stack = Vec::new();
+        let mut assignments = Vec::new();
+        let mut priority_cache = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+        let pnil = symbol_bytes("pnil");
+        let mut rule_evidence = Vec::new();
+        let mut evidence = Vec::new();
+        let mut pending = Vec::new();
 
         for goal in &self.goals {
             if !matches!(byte_item(goal[0]), Tag::Arity(_)) {
@@ -3707,7 +3717,7 @@ impl Sink for ScheduleRulesSink {
                 unsafe {
                     fused_rule_candidates += 1;
                 }
-                let mut rule = Vec::new();
+                rule.clear();
                 ExprEnv::new(0, rule_expr).args(&mut rule);
                 if rule.len() != 5
                     || !is_symbol(
@@ -3720,34 +3730,30 @@ impl Sink for ScheduleRulesSink {
                 let goal_expr = Expr {
                     ptr: goal.as_ptr().cast_mut(),
                 };
-                let mut pairs = vec![(rule[1], ExprEnv::new(1, goal_expr))];
+                pairs.clear();
+                pairs.push((rule[1], ExprEnv::new(1, goal_expr)));
                 unsafe {
                     fused_rule_unifications += 1;
                 }
                 let Ok(bindings) = unify(&mut pairs) else {
                     continue;
                 };
-                let apply_env = |env: ExprEnv| -> Option<Vec<u8>> {
-                    let mut output = Vec::new();
-                    let mut stack = Vec::new();
-                    let mut assignments = Vec::new();
-                    let (_, _, acyclic) =
-                        mork_expr::apply_e_clears_stacks_and_cycles_check!(
-                            env.n,
-                            env.v,
-                            0,
-                            env.subsexpr(),
-                            &bindings,
-                            output,
-                            stack,
-                            assignments
-                        );
-                    acyclic.then_some(output)
-                };
-                let Some(instantiated_rule) = apply_env(ExprEnv::new(0, rule_expr)) else {
+                instantiated_rule.clear();
+                let rule_env = ExprEnv::new(0, rule_expr);
+                let (_, _, acyclic) = mork_expr::apply_e_clears_stacks_and_cycles_check!(
+                    rule_env.n,
+                    rule_env.v,
+                    0,
+                    rule_env.subsexpr(),
+                    &bindings,
+                    instantiated_rule,
+                    apply_stack,
+                    assignments
+                );
+                if !acyclic {
                     requires_fallback = true;
                     continue;
-                };
+                }
                 let instantiated = expr_args(&instantiated_rule);
                 if instantiated.len() != 5 {
                     requires_fallback = true;
@@ -3765,19 +3771,20 @@ impl Sink for ScheduleRulesSink {
                 }
 
                 let confidence = stv_f64(stv[1], "rule confidence");
-                let priority_text = hex::encode(binary_f64_symbol(1.0 - confidence));
-                let priority = symbol_bytes(&priority_text);
-                let mut rule_evidence = Vec::new();
+                let priority = priority_cache.entry(stv[1].to_vec()).or_insert_with(|| {
+                    let text = hex::encode(binary_f64_symbol(1.0 - confidence));
+                    symbol_bytes(&text)
+                });
+                rule_evidence.clear();
                 push_expr(&mut rule_evidence, "rule-ev", &[instantiated[2]]);
-                let pnil = symbol_bytes("pnil");
-                let mut evidence = Vec::new();
+                evidence.clear();
                 push_expr(&mut evidence, "pcons", &[&rule_evidence, &pnil]);
-                let mut pending = Vec::new();
+                pending.clear();
                 push_expr(
                     &mut pending,
                     "pendingN",
                     &[
-                        &priority,
+                        priority,
                         instantiated[1],
                         instantiated[3],
                         instantiated[4],
