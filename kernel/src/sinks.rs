@@ -1576,7 +1576,11 @@ where
     }
     let mut facts: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
     while rz.to_next_val() {
-        if let Some((goal, stv)) = fact_row(rz.origin_path()) {
+        let path = rz.origin_path();
+        if !path.starts_with(&prefix) {
+            break;
+        }
+        if let Some((goal, stv)) = fact_row(path) {
             match facts.get(&goal) {
                 Some(old) if stv_parts(old).1 >= stv_parts(&stv).1 => {}
                 _ => {
@@ -1599,7 +1603,11 @@ where
     }
     let mut proved: BTreeMap<Vec<u8>, BTreeSet<ProofRow>> = BTreeMap::new();
     while rz.to_next_val() {
-        if let Some((goal, row)) = proved_row(rz.origin_path()) {
+        let path = rz.origin_path();
+        if !path.starts_with(&prefix) {
+            break;
+        }
+        if let Some((goal, row)) = proved_row(path) {
             proved.entry(goal).or_default().insert(row);
         }
     }
