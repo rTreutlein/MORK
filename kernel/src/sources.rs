@@ -1,9 +1,9 @@
 use log::trace;
-use pathmap::arena_compact::{ACTMmapZipper};
-use pathmap::PathMap;
-use pathmap::zipper::*;
-use mork_expr::{byte_item, destruct, item_byte, serialize, unify, Expr, ExprEnv, Tag};
 use mork_expr::macros::SerializableExpr;
+use mork_expr::{Expr, ExprEnv, Tag, byte_item, destruct, item_byte, serialize, unify};
+use pathmap::PathMap;
+use pathmap::arena_compact::ACTMmapZipper;
+use pathmap::zipper::*;
 use std::collections::BTreeSet;
 
 static mut HEAD_SOURCE_CANDIDATES: usize = 0;
@@ -12,20 +12,18 @@ static mut HEAD_SOURCE_ROWS: usize = 0;
 pub enum ResourceRequest<'a> {
     BTM(&'a [u8]),
     ACT(&'a str),
-    Z3(&'a str)
+    Z3(&'a str),
 }
 
 fn is_named_expr(e: Expr, name: &[u8], arity: u8) -> bool {
     if e.arity() != Some(arity) {
         return false;
     }
-
-    let mut args = Vec::new();
-    ExprEnv::new(0, e).args(&mut args);
-    let Some(symbol) = args.first().and_then(|arg| arg.subsexpr().symbol()) else {
+    let bytes = unsafe { e.span().as_ref().unwrap() };
+    let Tag::SymbolSize(size) = byte_item(bytes[1]) else {
         return false;
     };
-    unsafe { symbol.as_ref() == Some(name) }
+    size as usize == name.len() && &bytes[2..2 + size as usize] == name
 }
 
 /// Selects the first (`HEAD`) or last (`!HEAD`) `limit` matching paths.
@@ -40,7 +38,7 @@ struct HeadTailSource<const HEAD: bool> {
 
 impl<const HEAD: bool> Source for HeadTailSource<HEAD> {
     fn new(e: Expr) -> Self {
-        let mut args = Vec::new();
+        let mut args = Vec::with_capacity(3);
         ExprEnv::new(0, e).args(&mut args);
         assert_eq!(args.len(), 3, "head/tail expects a limit and a pattern");
 
@@ -85,7 +83,9 @@ impl<const HEAD: bool> Source for HeadTailSource<HEAD> {
     where
         'path: 'trie,
     {
-        let Resource::BTM(mut source) = resources.next().unwrap() else { unreachable!() };
+        let Resource::BTM(mut source) = resources.next().unwrap() else {
+            unreachable!()
+        };
         let mut selected = BTreeSet::new();
 
         if source.descend_to_existing(&self.target_prefix) == self.target_prefix.len() {
@@ -104,12 +104,11 @@ impl<const HEAD: bool> Source for HeadTailSource<HEAD> {
                     break;
                 }
                 if selected.len() > self.limit {
-                    let outside = if HEAD {
-                        selected.last().unwrap().clone()
+                    if HEAD {
+                        selected.pop_last();
                     } else {
-                        selected.first().unwrap().clone()
-                    };
-                    selected.remove(&outside);
+                        selected.pop_first();
+                    }
                 }
             }
         }
@@ -118,8 +117,14 @@ impl<const HEAD: bool> Source for HeadTailSource<HEAD> {
         unsafe {
             HEAD_SOURCE_ROWS += selected.len();
         }
+        let mut path = Vec::with_capacity(
+            self.source_prefix.len()
+                + self.target_prefix.len()
+                + selected.iter().map(Vec::len).max().unwrap_or(0),
+        );
         for relative in selected {
-            let mut path = self.source_prefix.clone();
+            path.clear();
+            path.extend_from_slice(&self.source_prefix);
             path.extend_from_slice(&self.target_prefix);
             path.extend_from_slice(&relative);
             output.insert(&path, ());
@@ -140,7 +145,7 @@ struct OneOfSource {
 
 impl OneOfSource {
     fn try_from_env(e: ExprEnv) -> Option<Self> {
-        let mut args = Vec::new();
+        let mut args = Vec::with_capacity(e.subsexpr().arity().unwrap_or(0) as usize);
         e.args(&mut args);
         if args.len() < 4 {
             return None;
@@ -163,7 +168,11 @@ impl OneOfSource {
                     .to_vec()
             })
             .collect();
-        Some(Self { output: args[1], alternatives, prefixes })
+        Some(Self {
+            output: args[1],
+            alternatives,
+            prefixes,
+        })
     }
 }
 
@@ -186,16 +195,24 @@ impl Source for OneOfSource {
         'path: 'trie,
     {
         let mut output = PathMap::new();
-        let mut buffer = Vec::new();
-        let mut stack = Vec::new();
-        let mut assignments = Vec::new();
+        let mut buffer = Vec::with_capacity(1024);
+        let mut stack = Vec::with_capacity(32);
+        let mut assignments = Vec::with_capacity(32);
+        let mut pairs = Vec::with_capacity(1);
 
         for alternative in &self.alternatives {
-            let Resource::BTM(mut source) = resources.next().unwrap() else { unreachable!() };
+            let Resource::BTM(mut source) = resources.next().unwrap() else {
+                unreachable!()
+            };
             while source.to_next_val() {
-                let candidate = Expr { ptr: source.origin_path().as_ptr().cast_mut() };
-                let mut pairs = vec![(*alternative, ExprEnv::new(1, candidate))];
-                let Ok(bindings) = unify(&mut pairs) else { continue };
+                let candidate = Expr {
+                    ptr: source.origin_path().as_ptr().cast_mut(),
+                };
+                pairs.clear();
+                pairs.push((*alternative, ExprEnv::new(1, candidate)));
+                let Ok(bindings) = unify(&mut pairs) else {
+                    continue;
+                };
 
                 buffer.clear();
                 let (_, _, true) = mork_expr::apply_e_clears_stacks_and_cycles_check!(
@@ -207,7 +224,9 @@ impl Source for OneOfSource {
                     buffer,
                     stack,
                     assignments
-                ) else { continue };
+                ) else {
+                    continue;
+                };
                 output.insert(&buffer, ());
             }
         }
@@ -218,54 +237,81 @@ impl Source for OneOfSource {
 pub(crate) enum Resource<'trie, 'path> {
     BTM(ReadZipperUntracked<'trie, 'path, ()>),
     ACT(ACTMmapZipper<'trie, ()>),
-    Z3(ReadZipperOwned<()>)
+    Z3(ReadZipperOwned<()>),
 }
 
 pub(crate) trait Source {
     // step 1: parsing the source
     fn new(e: Expr) -> Self;
     // step 2: request access to resources before running
-    fn request(&self) -> impl Iterator<Item=ResourceRequest<'_>>;
+    fn request(&self) -> impl Iterator<Item = ResourceRequest<'_>>;
     // step 3: create the factor in the product/the (virtual) zipper for the source
-    fn source<'trie, 'path, It : Iterator<Item=Resource<'trie, 'path>>>(&self, it: It) -> AFactor<'trie, ()> where 'path : 'trie;
+    fn source<'trie, 'path, It: Iterator<Item = Resource<'trie, 'path>>>(
+        &self,
+        it: It,
+    ) -> AFactor<'trie, ()>
+    where
+        'path: 'trie;
 }
 
 struct CompatSource {
-    e: Expr
+    e: Expr,
 }
 impl Source for CompatSource {
     fn new(e: Expr) -> Self {
         Self { e }
     }
 
-    fn request(&self) -> impl Iterator<Item=ResourceRequest<'_>> {
+    fn request(&self) -> impl Iterator<Item = ResourceRequest<'_>> {
         std::iter::once(ResourceRequest::BTM([].as_slice()))
     }
 
-    fn source<'trie, 'path, It: Iterator<Item=Resource<'trie, 'path>>>(&self, mut it: It) -> AFactor<'trie, ()> where 'path : 'trie {
-        let Resource::BTM(rz) = it.next().unwrap() else { unreachable!() };
+    fn source<'trie, 'path, It: Iterator<Item = Resource<'trie, 'path>>>(
+        &self,
+        mut it: It,
+    ) -> AFactor<'trie, ()>
+    where
+        'path: 'trie,
+    {
+        let Resource::BTM(rz) = it.next().unwrap() else {
+            unreachable!()
+        };
         AFactor::CompatSource(rz)
     }
 }
 
 struct BTMSource {
-    e: Expr
+    e: Expr,
 }
 impl Source for BTMSource {
     fn new(e: Expr) -> Self {
         BTMSource { e }
     }
 
-    fn request(&self) -> impl Iterator<Item=ResourceRequest<'_>> {
+    fn request(&self) -> impl Iterator<Item = ResourceRequest<'_>> {
         std::iter::once(ResourceRequest::BTM([].as_slice()))
     }
 
-    fn source<'trie, 'path, It: Iterator<Item=Resource<'trie, 'path>>>(&self, mut it: It) -> AFactor<'trie, ()> where 'path : 'trie {
+    fn source<'trie, 'path, It: Iterator<Item = Resource<'trie, 'path>>>(
+        &self,
+        mut it: It,
+    ) -> AFactor<'trie, ()>
+    where
+        'path: 'trie,
+    {
         // (I (BTM <pat1>) (ACT <filename> <pat2>)
         //    --factor1--  -----factor2---------
         // prefix: '[2] BTM'
-        static PREFIX: [u8; 5] = [item_byte(Tag::Arity(2)), item_byte(Tag::SymbolSize(3)), b'B', b'T', b'M'];
-        let Resource::BTM(rz) = it.next().unwrap() else { unreachable!() };
+        static PREFIX: [u8; 5] = [
+            item_byte(Tag::Arity(2)),
+            item_byte(Tag::SymbolSize(3)),
+            b'B',
+            b'T',
+            b'M',
+        ];
+        let Resource::BTM(rz) = it.next().unwrap() else {
+            unreachable!()
+        };
         let rz = PrefixZipper::new(&PREFIX[..], rz);
         AFactor::PosSource(rz)
     }
@@ -273,7 +319,7 @@ impl Source for BTMSource {
 
 struct ACTSource {
     e: Expr,
-    act: &'static str
+    act: &'static str,
 }
 impl Source for ACTSource {
     fn new(e: Expr) -> Self {
@@ -282,17 +328,31 @@ impl Source for ACTSource {
         }, _err => { panic!("act not the right shape") });
     }
 
-    fn request(&self) -> impl Iterator<Item=ResourceRequest<'_>> {
+    fn request(&self) -> impl Iterator<Item = ResourceRequest<'_>> {
         std::iter::once(ResourceRequest::ACT(self.act))
     }
 
-    fn source<'trie, 'path, It: Iterator<Item=Resource<'trie, 'path>>>(&self, mut it: It) -> AFactor<'trie, ()> where 'path : 'trie {
+    fn source<'trie, 'path, It: Iterator<Item = Resource<'trie, 'path>>>(
+        &self,
+        mut it: It,
+    ) -> AFactor<'trie, ()>
+    where
+        'path: 'trie,
+    {
         // prefix: '[3] ACT <filename>'
-        static CONSTANT_PREFIX: [u8; 5] = [item_byte(Tag::Arity(3)), item_byte(Tag::SymbolSize(3)), b'A', b'C', b'T'];
-        let Resource::ACT(rz) = it.next().unwrap() else { unreachable!() };
+        static CONSTANT_PREFIX: [u8; 5] = [
+            item_byte(Tag::Arity(3)),
+            item_byte(Tag::SymbolSize(3)),
+            b'A',
+            b'C',
+            b'T',
+        ];
+        let Resource::ACT(rz) = it.next().unwrap() else {
+            unreachable!()
+        };
         let mut prefix = vec![];
         prefix.extend_from_slice(&CONSTANT_PREFIX[..]);
-        prefix.push(item_byte(Tag::SymbolSize( (self.act.size() as u8) - 1)));
+        prefix.push(item_byte(Tag::SymbolSize((self.act.size() as u8) - 1)));
         prefix.extend_from_slice(self.act.as_bytes());
         trace!(target: "source", "act prefix {}", serialize(&prefix[..]));
         let rz = PrefixZipper::new(prefix, rz);
@@ -303,7 +363,7 @@ impl Source for ACTSource {
 #[cfg(feature = "z3")]
 struct Z3Source {
     e: Expr,
-    ins: &'static str
+    ins: &'static str,
 }
 #[cfg(feature = "z3")]
 impl Source for Z3Source {
@@ -313,17 +373,30 @@ impl Source for Z3Source {
         }, _err => { panic!("z3 not the right shape {:?}", e) });
     }
 
-    fn request(&self) -> impl Iterator<Item=ResourceRequest<'_>> {
+    fn request(&self) -> impl Iterator<Item = ResourceRequest<'_>> {
         std::iter::once(ResourceRequest::Z3(self.ins))
     }
 
-    fn source<'trie, 'path, It: Iterator<Item=Resource<'trie, 'path>>>(&self, mut it: It) -> AFactor<'trie, ()> where 'path : 'trie {
+    fn source<'trie, 'path, It: Iterator<Item = Resource<'trie, 'path>>>(
+        &self,
+        mut it: It,
+    ) -> AFactor<'trie, ()>
+    where
+        'path: 'trie,
+    {
         // prefix: '[3] z3 <instance name>'
-        static CONSTANT_PREFIX: [u8; 4] = [item_byte(Tag::Arity(3)), item_byte(Tag::SymbolSize(2)), b'z', b'3'];
-        let Resource::Z3(rz) = it.next().unwrap() else { unreachable!() };
+        static CONSTANT_PREFIX: [u8; 4] = [
+            item_byte(Tag::Arity(3)),
+            item_byte(Tag::SymbolSize(2)),
+            b'z',
+            b'3',
+        ];
+        let Resource::Z3(rz) = it.next().unwrap() else {
+            unreachable!()
+        };
         let mut prefix = vec![];
         prefix.extend_from_slice(&CONSTANT_PREFIX[..]);
-        prefix.push(item_byte(Tag::SymbolSize( (self.ins.size() as u8) - 1)));
+        prefix.push(item_byte(Tag::SymbolSize((self.ins.size() as u8) - 1)));
         prefix.extend_from_slice(self.ins.as_bytes());
         trace!(target: "source", "z3 prefix {}", serialize(&prefix[..]));
         let rz = PrefixZipper::new(prefix, rz);
@@ -331,23 +404,36 @@ impl Source for Z3Source {
     }
 }
 
-
 struct CmpSource {
     e: Expr,
-    cmp: usize
+    cmp: usize,
 }
 
 impl CmpSource {
-    fn policy(ctx: (usize, PathMap<()>), p: &[u8], c: usize) -> ((usize, PathMap<()>), Option<ReadZipperOwned<()>>) {
+    fn policy(
+        ctx: (usize, PathMap<()>),
+        p: &[u8],
+        c: usize,
+    ) -> ((usize, PathMap<()>), Option<ReadZipperOwned<()>>) {
         let (cmp, map) = ctx;
         if c == 0 {
             if cmp == 0 {
                 trace!(target: "source", "== enrolling at {}", serialize(p));
                 // bug: de bruijn levels broken, easy fix: shift the copy of p by introductions(p)
-                let e = Expr{ ptr: p.as_ptr().cast_mut() };
+                let e = Expr {
+                    ptr: p.as_ptr().cast_mut(),
+                };
                 let mut qv = p.to_vec();
-                e.shift(e.newvars() as _, &mut mork_expr::ExprZipper::new(Expr{ ptr: qv.as_mut_ptr() }));
-                ((cmp, map), Some(PathMap::single(&qv[..], ()).into_read_zipper(&[])))
+                e.shift(
+                    e.newvars() as _,
+                    &mut mork_expr::ExprZipper::new(Expr {
+                        ptr: qv.as_mut_ptr(),
+                    }),
+                );
+                (
+                    (cmp, map),
+                    Some(PathMap::single(&qv[..], ()).into_read_zipper(&[])),
+                )
             } else if cmp == 1 {
                 let mut cloned = map.clone();
                 let present = cloned.remove(p).is_some();
@@ -389,32 +475,75 @@ impl Source for CmpSource {
         CmpSource { e, cmp }
     }
 
-    fn request(&self) -> impl Iterator<Item=ResourceRequest<'_>> {
+    fn request(&self) -> impl Iterator<Item = ResourceRequest<'_>> {
         std::iter::once(ResourceRequest::BTM([].as_slice()))
     }
 
-    fn source<'trie, 'path, It: Iterator<Item=Resource<'trie, 'path>>>(&self, mut it: It) -> AFactor<'trie, ()> where 'path : 'trie {
-        static EQ_PREFIX: [u8; 4] = [item_byte(Tag::Arity(3)), item_byte(Tag::SymbolSize(2)), b'=', b'='];
-        static NE_PREFIX: [u8; 4] = [item_byte(Tag::Arity(3)), item_byte(Tag::SymbolSize(2)), b'!', b'='];
-        static LT_PREFIX: [u8; 3] = [item_byte(Tag::Arity(3)), item_byte(Tag::SymbolSize(1)), b'<'];
-        let Resource::BTM(rz) = it.next().unwrap() else { unreachable!() };
+    fn source<'trie, 'path, It: Iterator<Item = Resource<'trie, 'path>>>(
+        &self,
+        mut it: It,
+    ) -> AFactor<'trie, ()>
+    where
+        'path: 'trie,
+    {
+        static EQ_PREFIX: [u8; 4] = [
+            item_byte(Tag::Arity(3)),
+            item_byte(Tag::SymbolSize(2)),
+            b'=',
+            b'=',
+        ];
+        static NE_PREFIX: [u8; 4] = [
+            item_byte(Tag::Arity(3)),
+            item_byte(Tag::SymbolSize(2)),
+            b'!',
+            b'=',
+        ];
+        static LT_PREFIX: [u8; 3] = [
+            item_byte(Tag::Arity(3)),
+            item_byte(Tag::SymbolSize(1)),
+            b'<',
+        ];
+        let Resource::BTM(rz) = it.next().unwrap() else {
+            unreachable!()
+        };
         let map = rz.try_make_map().unwrap();
-        let rz = DependentProductZipperG::new_enroll(rz, (self.cmp, map),
-            CmpSource::policy as for<'a> fn((usize, PathMap<()>), &'a [u8], usize) -> ((usize, PathMap<()>), Option<ReadZipperOwned<()>>));
+        let rz = DependentProductZipperG::new_enroll(
+            rz,
+            (self.cmp, map),
+            CmpSource::policy
+                as for<'a> fn(
+                    (usize, PathMap<()>),
+                    &'a [u8],
+                    usize,
+                )
+                    -> ((usize, PathMap<()>), Option<ReadZipperOwned<()>>),
+        );
         let rz = PrefixZipper::new(
-            if self.cmp == 0 { &EQ_PREFIX[..] }
-            else if self.cmp == 1 { &NE_PREFIX[..] }
-            else if self.cmp == 2 { &LT_PREFIX[..] }
-            else { unreachable!() },
-            rz);
+            if self.cmp == 0 {
+                &EQ_PREFIX[..]
+            } else if self.cmp == 1 {
+                &NE_PREFIX[..]
+            } else if self.cmp == 2 {
+                &LT_PREFIX[..]
+            } else {
+                unreachable!()
+            },
+            rz,
+        );
         AFactor::CmpSource(rz)
     }
 }
 
-
-pub enum ASource { PosSource(BTMSource), ACTSource(ACTSource), CmpSource(CmpSource), HeadSource(HeadTailSource<true>), TailSource(HeadTailSource<false>), OneOfSource(OneOfSource), CompatSource(CompatSource),
+pub enum ASource {
+    PosSource(BTMSource),
+    ACTSource(ACTSource),
+    CmpSource(CmpSource),
+    HeadSource(HeadTailSource<true>),
+    TailSource(HeadTailSource<false>),
+    OneOfSource(OneOfSource),
+    CompatSource(CompatSource),
     #[cfg(feature = "z3")]
-    Z3Source(Z3Source)
+    Z3Source(Z3Source),
 }
 
 #[derive(PolyZipper)]
@@ -422,8 +551,23 @@ pub enum AFactor<'trie, V: Clone + Send + Sync + Unpin + 'static = ()> {
     CompatSource(ReadZipperUntracked<'trie, 'trie, V>),
     PosSource(PrefixZipper<'trie, ReadZipperUntracked<'trie, 'trie, V>>),
     ACTSource(PrefixZipper<'trie, ACTMmapZipper<'trie, V>>),
-    CmpSource(PrefixZipper<'trie, DependentProductZipperG<'trie, ReadZipperUntracked<'trie, 'trie, V>,
-        ReadZipperOwned<V>, V, (usize, PathMap<()>), for<'a> fn((usize, PathMap<()>), &'a [u8], usize) -> ((usize, PathMap<()>), Option<ReadZipperOwned<V>>)>>),
+    CmpSource(
+        PrefixZipper<
+            'trie,
+            DependentProductZipperG<
+                'trie,
+                ReadZipperUntracked<'trie, 'trie, V>,
+                ReadZipperOwned<V>,
+                V,
+                (usize, PathMap<()>),
+                for<'a> fn(
+                    (usize, PathMap<()>),
+                    &'a [u8],
+                    usize,
+                ) -> ((usize, PathMap<()>), Option<ReadZipperOwned<V>>),
+            >,
+        >,
+    ),
     MaterializedSource(ReadZipperOwned<V>),
     #[cfg(feature = "z3")]
     Z3Source(PrefixZipper<'trie, ReadZipperOwned<V>>),
@@ -452,16 +596,41 @@ impl ASource {
 
 impl Source for ASource {
     fn new(e: Expr) -> Self {
-        if unsafe { *e.ptr == item_byte(Tag::Arity(2)) && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(3)) && *e.ptr.offset(2) == b'B' && *e.ptr.offset(3) == b'T' && *e.ptr.offset(4) == b'M' } {
+        if unsafe {
+            *e.ptr == item_byte(Tag::Arity(2))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(3))
+                && *e.ptr.offset(2) == b'B'
+                && *e.ptr.offset(3) == b'T'
+                && *e.ptr.offset(4) == b'M'
+        } {
             ASource::PosSource(BTMSource::new(e))
-        } else if unsafe { *e.ptr == item_byte(Tag::Arity(3)) && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(3)) && *e.ptr.offset(2) == b'A' && *e.ptr.offset(3) == b'C' && *e.ptr.offset(4) == b'T' } {
+        } else if unsafe {
+            *e.ptr == item_byte(Tag::Arity(3))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(3))
+                && *e.ptr.offset(2) == b'A'
+                && *e.ptr.offset(3) == b'C'
+                && *e.ptr.offset(4) == b'T'
+        } {
             ASource::ACTSource(ACTSource::new(e))
-        } else if unsafe { *e.ptr == item_byte(Tag::Arity(3)) && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(2)) && *e.ptr.offset(2) == b'z' && *e.ptr.offset(3) == b'3' } {
+        } else if unsafe {
+            *e.ptr == item_byte(Tag::Arity(3))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(2))
+                && *e.ptr.offset(2) == b'z'
+                && *e.ptr.offset(3) == b'3'
+        } {
             #[cfg(feature = "z3")]
             return ASource::Z3Source(Z3Source::new(e));
             #[cfg(not(feature = "z3"))]
-            panic!("MORK was not built with the z3 feature, yet trying to call {:?}", e);
-        } else if unsafe { *e.ptr == item_byte(Tag::Arity(3)) && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(2)) && (*e.ptr.offset(2) == b'=' || *e.ptr.offset(2) == b'!') && *e.ptr.offset(3) == b'=' } {
+            panic!(
+                "MORK was not built with the z3 feature, yet trying to call {:?}",
+                e
+            );
+        } else if unsafe {
+            *e.ptr == item_byte(Tag::Arity(3))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(2))
+                && (*e.ptr.offset(2) == b'=' || *e.ptr.offset(2) == b'!')
+                && *e.ptr.offset(3) == b'='
+        } {
             ASource::CmpSource(CmpSource::new(e))
         } else if is_named_expr(e, b"<", 3) {
             ASource::CmpSource(CmpSource::new(e))
@@ -474,33 +643,71 @@ impl Source for ASource {
         }
     }
 
-    fn request(&self) -> impl Iterator<Item=ResourceRequest<'_>> {
+    fn request(&self) -> impl Iterator<Item = ResourceRequest<'_>> {
         gen move {
             match self {
-                ASource::PosSource(s) => { for i in s.request().into_iter() { yield i } }
-                ASource::ACTSource(s) => { for i in s.request().into_iter() { yield i } }
-                ASource::CmpSource(s) => { for i in s.request().into_iter() { yield i } }
-                ASource::HeadSource(s) => { for i in s.request().into_iter() { yield i } }
-                ASource::TailSource(s) => { for i in s.request().into_iter() { yield i } }
-                ASource::OneOfSource(s) => { for i in s.request().into_iter() { yield i } }
-                ASource::CompatSource(s) => { for i in s.request().into_iter() { yield i } }
+                ASource::PosSource(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
+                ASource::ACTSource(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
+                ASource::CmpSource(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
+                ASource::HeadSource(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
+                ASource::TailSource(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
+                ASource::OneOfSource(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
+                ASource::CompatSource(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
                 #[cfg(feature = "z3")]
-                ASource::Z3Source(s) => { for i in s.request().into_iter() { yield i } }
+                ASource::Z3Source(s) => {
+                    for i in s.request().into_iter() {
+                        yield i
+                    }
+                }
             }
         }
     }
 
-    fn source<'trie, 'path, It: Iterator<Item=Resource<'trie, 'path>>>(&self, mut it: It) -> AFactor<'trie, ()> where 'path : 'trie {
+    fn source<'trie, 'path, It: Iterator<Item = Resource<'trie, 'path>>>(
+        &self,
+        mut it: It,
+    ) -> AFactor<'trie, ()>
+    where
+        'path: 'trie,
+    {
         match self {
-            ASource::PosSource(s) => { s.source(it) }
-            ASource::ACTSource(s) => { s.source(it) }
-            ASource::CmpSource(s) => { s.source(it) }
-            ASource::HeadSource(s) => { s.source(it) }
-            ASource::TailSource(s) => { s.source(it) }
-            ASource::OneOfSource(s) => { s.source(it) }
-            ASource::CompatSource(s) => { s.source(it) }
+            ASource::PosSource(s) => s.source(it),
+            ASource::ACTSource(s) => s.source(it),
+            ASource::CmpSource(s) => s.source(it),
+            ASource::HeadSource(s) => s.source(it),
+            ASource::TailSource(s) => s.source(it),
+            ASource::OneOfSource(s) => s.source(it),
+            ASource::CompatSource(s) => s.source(it),
             #[cfg(feature = "z3")]
-            ASource::Z3Source(s) => { s.source(it) }
+            ASource::Z3Source(s) => s.source(it),
         }
     }
 }
