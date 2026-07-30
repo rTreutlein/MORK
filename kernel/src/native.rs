@@ -36,7 +36,7 @@ pub struct ExecutionStats {
     pub head_source_candidates: usize,
     pub head_source_rows: usize,
     pub elapsed_ns: u128,
-    pub sink_timings: Vec<StageTiming>,
+    pub stage_timings: Vec<StageTiming>,
 }
 
 pub struct NativeSpace {
@@ -87,7 +87,7 @@ impl NativeSpace {
         let started = Instant::now();
         reset_sink_profiling(self.space.timing);
         let steps = self.space.metta_calculus(step_budget);
-        let sink_timings = take_sink_timings()
+        let stage_timings = take_sink_timings()
             .into_iter()
             .map(|timing| StageTiming {
                 stage: timing.sink.to_owned(),
@@ -120,7 +120,7 @@ impl NativeSpace {
             head_source_candidates: after.6.saturating_sub(before.6),
             head_source_rows: after.7.saturating_sub(before.7),
             elapsed_ns,
-            sink_timings,
+            stage_timings,
         }
     }
 
@@ -200,13 +200,13 @@ mod tests {
         let stats = space.execute(1);
         assert_eq!(stats.steps, 1);
         assert!(stats.transitions > 0);
-        assert!(stats.sink_timings.iter().any(|timing| {
+        assert!(stats.stage_timings.iter().any(|timing| {
             timing.stage == "add"
                 && timing.phase == "consume"
                 && timing.calls == 1
                 && timing.elapsed_ns > 0
         }));
-        assert!(stats.sink_timings.iter().any(|timing| {
+        assert!(stats.stage_timings.iter().any(|timing| {
             timing.stage == "runtime"
                 && timing.phase == "multi-output"
                 && timing.calls == 1
