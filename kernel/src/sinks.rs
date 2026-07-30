@@ -688,14 +688,23 @@ fn symbol_bytes(s: &str) -> Vec<u8> {
 }
 
 fn push_expr(out: &mut Vec<u8>, name: &str, args: &[&[u8]]) {
+    out.reserve(
+        2 + name.len()
+            + args
+                .iter()
+                .map(|arg| arg.len())
+                .sum::<usize>(),
+    );
     out.push(item_byte(Tag::Arity((args.len() + 1) as u8)));
-    out.extend_from_slice(&symbol_bytes(name));
+    out.push(item_byte(Tag::SymbolSize(name.len() as u8)));
+    out.extend_from_slice(name.as_bytes());
     for arg in args {
         out.extend_from_slice(arg);
     }
 }
 
 fn push_raw_expr(out: &mut Vec<u8>, args: &[&[u8]]) {
+    out.reserve(1 + args.iter().map(|arg| arg.len()).sum::<usize>());
     out.push(item_byte(Tag::Arity(args.len() as u8)));
     for arg in args {
         out.extend_from_slice(arg);
@@ -1072,7 +1081,14 @@ fn is_inversion_snapshot_proof(proof_id: &[u8]) -> bool {
 // variables, so identity is alpha-equivalent proof structure plus evidence,
 // not byte equality. Keep the strongest current snapshot deterministically.
 fn select_current_snapshot_proofs(rows: &BTreeSet<ProofRow>) -> BTreeSet<ProofRow> {
-    let mut selected = Vec::<ProofRow>::new();
+    select_current_snapshot_proof_refs(rows)
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
+fn select_current_snapshot_proof_refs(rows: &BTreeSet<ProofRow>) -> Vec<&ProofRow> {
+    let mut selected: Vec<&ProofRow> = Vec::with_capacity(rows.len());
     for row in rows {
         if let Some(current) = selected
             .iter_mut()
@@ -1085,13 +1101,14 @@ fn select_current_snapshot_proofs(rows: &BTreeSet<ProofRow>) -> BTreeSet<ProofRo
                 .then_with(|| strength.total_cmp(&current_strength))
                 .is_gt()
             {
-                *current = row.clone();
+                *current = row;
             }
         } else {
-            selected.push(row.clone());
+            selected.push(row);
         }
     }
-    selected.into_iter().collect()
+    selected.sort_unstable();
+    selected
 }
 
 #[derive(Clone)]
@@ -1436,13 +1453,15 @@ fn union_proof_evidence(proofs: &[ScheduledCtvProof]) -> Vec<u8> {
     })
 }
 
-fn factor_merge_all_shared_proofs(rows: &BTreeSet<ProofRow>) -> Option<(Vec<u8>, Vec<u8>)> {
+fn factor_merge_all_shared_proofs(
+    rows: &[&ProofRow],
+) -> Option<(Vec<u8>, Vec<u8>)> {
     if rows.len() < 2 {
         return None;
     }
     let proofs: Vec<_> = rows
         .iter()
-        .map(parse_scheduled_ctv_proof)
+        .map(|row| parse_scheduled_ctv_proof(row))
         .collect::<Option<Vec<_>>>()?;
 
     let mut shared = fact_evidence_keys(&proofs.first()?.evset);
@@ -1735,7 +1754,7 @@ fn shared_conjunction_stv(
 }
 
 fn factor_merge_with_fact_stvs(
-    rows: &BTreeSet<ProofRow>,
+    rows: &[&ProofRow],
     facts: &BTreeMap<Vec<u8>, Vec<u8>>,
     proved: &BTreeMap<Vec<u8>, BTreeSet<ProofRow>>,
 ) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -1744,7 +1763,7 @@ fn factor_merge_with_fact_stvs(
     }
     let proofs: Vec<_> = rows
         .iter()
-        .map(parse_scheduled_ctv_proof)
+        .map(|row| parse_scheduled_ctv_proof(row))
         .collect::<Option<Vec<_>>>()?;
 
     let mut shared = expanded_fact_evidence_keys(&proofs.first()?.evset, proved);
@@ -1808,7 +1827,7 @@ fn factor_merge_with_fact_stvs(
     Some((merged, union_proof_evidence(&proofs)))
 }
 
-fn all_scheduled_ctv_proof_rows(rows: &BTreeSet<ProofRow>) -> bool {
+fn all_scheduled_ctv_proof_rows(rows: &[&ProofRow]) -> bool {
     rows.iter()
         .all(|row| parse_scheduled_ctv_proof(row).is_some())
 }
@@ -3373,87 +3392,94 @@ impl Sink for ReviseProofsSink {
         let mut remove = PathMap::new();
         let mut add = PathMap::new();
         let mut fact_stvs = None;
-        let mut proved_rows = None;
+        let proved_rows = collect_proved_rows(wz);
+        let mut remove_expr = Vec::with_capacity(256);
+        let mut add_expr = Vec::with_capacity(256);
+        let mut nested_expr = Vec::with_capacity(128);
 
         for (goal, group) in &self.groups {
-            let current_proofs = select_current_snapshot_proofs(&group.proofs);
-            let existing_goal_proofs = proved_rows
-                .get_or_insert_with(|| collect_proved_rows(wz))
-                .get(goal)
-                .cloned()
-                .unwrap_or_default();
-            let recursive_current_proofs: BTreeSet<_> = if group.old_facts.is_empty() {
-                BTreeSet::new()
+            let current_proofs = select_current_snapshot_proof_refs(&group.proofs);
+            let existing_goal_proofs = proved_rows.get(goal);
+            let recursive_current_proofs: Vec<_> = if group.old_facts.is_empty() {
+                vec![false; current_proofs.len()]
             } else {
-                let proved = proved_rows.as_ref().expect("proved rows were collected");
                 current_proofs
                     .iter()
-                    .filter(|(_stv, _proof_id, evset)| {
-                        evidence_depends_on_fact(evset, goal, proved)
+                    .map(|(_stv, _proof_id, evset)| {
+                        evidence_depends_on_fact(evset, goal, &proved_rows)
                     })
-                    .cloned()
                     .collect()
             };
-            let acyclic_current_proofs: BTreeSet<_> = current_proofs
-                .difference(&recursive_current_proofs)
-                .cloned()
-                .collect();
             // Generated inheritance views remain backward proof alternatives,
             // but they do not revise a primary asserted/ordinary positive
             // proof into a different canonical forward premise. A refutation
             // is different: it must still revise with a generated positive
             // view (Flying Raven's Penguin counter-evidence), independent of
             // which proof happens to reach this sink first.
-            let has_primary_positive_proof = acyclic_current_proofs
+            let has_primary_positive_proof = current_proofs
                 .iter()
-                .chain(existing_goal_proofs.iter())
+                .zip(&recursive_current_proofs)
+                .filter(|(_row, recursive)| !**recursive)
+                .map(|(row, _recursive)| *row)
+                .chain(existing_goal_proofs.into_iter().flatten())
                 .any(|(_stv, proof_id, _evset)| {
                     !is_generated_inheritance_view_proof(proof_id)
                         && !is_inheritance_refutation_proof(proof_id)
                 });
-            let canonical_current_proofs: BTreeSet<_> = acyclic_current_proofs
-                .iter()
-                .filter(|(_stv, proof_id, _evset)| {
-                    !has_primary_positive_proof || !is_generated_inheritance_view_proof(proof_id)
-                })
-                .cloned()
-                .collect();
-            let mut factor_rows = BTreeSet::new();
+            let is_canonical = |proof_id: &[u8]| {
+                !has_primary_positive_proof || !is_generated_inheritance_view_proof(proof_id)
+            };
+            let mut factor_rows: Vec<&ProofRow> = Vec::new();
             if group.old_facts.is_empty() {
-                factor_rows.extend(canonical_current_proofs.iter().cloned());
+                factor_rows.extend(
+                    current_proofs
+                        .iter()
+                        .zip(&recursive_current_proofs)
+                        .filter(|(row, recursive)| !**recursive && is_canonical(&row.1))
+                        .map(|(row, _recursive)| *row),
+                );
             } else {
                 factor_rows.extend(
                     group
                         .existing_proofs
                         .iter()
                         .filter(|(_stv, proof_id, _evset)| {
-                            !has_primary_positive_proof
-                                || !is_generated_inheritance_view_proof(proof_id)
-                        })
-                        .cloned(),
+                            is_canonical(proof_id)
+                        }),
                 );
                 factor_rows.extend(
                     existing_goal_proofs
-                        .iter()
+                        .into_iter()
+                        .flatten()
                         .filter(|stored| {
-                            (!has_primary_positive_proof
-                                || !is_generated_inheritance_view_proof(&stored.1))
-                                && !canonical_current_proofs
+                            is_canonical(&stored.1)
+                                && !current_proofs
                                     .iter()
-                                    .any(|current| proof_identity_equal(stored, current))
-                        })
-                        .cloned(),
+                                    .zip(&recursive_current_proofs)
+                                    .any(|(current, recursive)| {
+                                        !*recursive
+                                            && is_canonical(&current.1)
+                                            && proof_identity_equal(stored, current)
+                                    })
+                        }),
                 );
                 if !factor_rows.is_empty() {
-                    factor_rows.extend(canonical_current_proofs.iter().cloned());
+                    factor_rows.extend(
+                        current_proofs
+                            .iter()
+                            .zip(&recursive_current_proofs)
+                            .filter(|(row, recursive)| !**recursive && is_canonical(&row.1))
+                            .map(|(row, _recursive)| *row),
+                    );
                 }
             }
+            factor_rows.sort_unstable();
+            factor_rows.dedup();
             let factored = if factor_rows.len() >= 2 {
                 factor_merge_all_shared_proofs(&factor_rows).or_else(|| {
                     if all_scheduled_ctv_proof_rows(&factor_rows) {
                         let facts = fact_stvs.get_or_insert_with(|| collect_fact_stvs(wz));
-                        let proved = proved_rows.get_or_insert_with(|| collect_proved_rows(wz));
-                        factor_merge_with_fact_stvs(&factor_rows, facts, proved)
+                        factor_merge_with_fact_stvs(&factor_rows, facts, &proved_rows)
                     } else {
                         None
                     }
@@ -3461,57 +3487,60 @@ impl Sink for ReviseProofsSink {
             } else {
                 None
             };
+            let has_factored = factored.is_some();
             let mut merged = if factor_rows.len() == 1 {
                 factor_rows
                     .iter()
                     .next()
                     .map(|(stv, _proof_id, evset)| (stv.clone(), evset.clone()))
             } else {
-                factored
-                    .clone()
-                    .or_else(|| group.old_facts.iter().next().cloned())
+                factored.or_else(|| group.old_facts.iter().next().cloned())
             };
             for (old_stv, old_ev) in &group.old_facts {
-                let mut fact = Vec::new();
-                push_expr(&mut fact, "fact", &[goal, old_stv]);
-                remove.insert(&fact[..], ());
+                remove_expr.clear();
+                push_expr(&mut remove_expr, "fact", &[goal, old_stv]);
+                remove.insert(&remove_expr[..], ());
 
-                let mut fact_evidence = Vec::new();
+                remove_expr.clear();
                 push_expr(
-                    &mut fact_evidence,
+                    &mut remove_expr,
                     "fact-evidence",
                     &[goal, old_stv, old_ev],
                 );
-                remove.insert(&fact_evidence[..], ());
+                remove.insert(&remove_expr[..], ());
             }
-            for (stv, proof_id, evset) in &current_proofs {
-                let mut open_proof = Vec::new();
-                push_expr(&mut open_proof, "open-proof", &[goal, stv, proof_id, evset]);
-                remove.insert(&open_proof[..], ());
+            for (current_index, current) in current_proofs.iter().enumerate() {
+                let (stv, proof_id, evset) = *current;
+                remove_expr.clear();
+                push_expr(
+                    &mut remove_expr,
+                    "open-proof",
+                    &[goal, stv, proof_id, evset],
+                );
+                remove.insert(&remove_expr[..], ());
 
                 // A refined snapshot supersedes its alpha-equivalent stored
                 // proof before revision, for ordinary and inversion rules.
-                let current = (stv.clone(), proof_id.clone(), evset.clone());
-                for (old_stv, old_proof_id, old_evset) in &existing_goal_proofs {
-                    let old = (old_stv.clone(), old_proof_id.clone(), old_evset.clone());
-                    if proof_identity_equal(&old, &current) {
-                        let mut old_proved = Vec::new();
+                for old in existing_goal_proofs.into_iter().flatten() {
+                    if proof_identity_equal(old, current) {
+                        let (old_stv, old_proof_id, old_evset) = old;
+                        remove_expr.clear();
                         push_expr(
-                            &mut old_proved,
+                            &mut remove_expr,
                             "proved",
                             &[goal, old_stv, old_proof_id, old_evset],
                         );
-                        remove.insert(&old_proved[..], ());
+                        remove.insert(&remove_expr[..], ());
                     }
                 }
 
-                if recursive_current_proofs.contains(&current) {
+                if recursive_current_proofs[current_index] {
                     continue;
                 }
 
-                let mut proved = Vec::new();
-                push_expr(&mut proved, "proved", &[goal, stv, proof_id, evset]);
-                add.insert(&proved[..], ());
+                add_expr.clear();
+                push_expr(&mut add_expr, "proved", &[goal, stv, proof_id, evset]);
+                add.insert(&add_expr[..], ());
 
                 // Query-local lift producers are private frontier goals. A
                 // producer embeds its public target and all downstream goals,
@@ -3521,30 +3550,30 @@ impl Sink for ReviseProofsSink {
                 if matches!(byte_item(goal[0]), Tag::Arity(_)) {
                     let producer = expr_args(goal);
                     if producer.len() == 5 && is_symbol(producer[0], "mm2-query-producer") {
-                        let mut published_proof = Vec::new();
-                        push_expr(&mut published_proof, "query-producer", &[proof_id]);
-                        let mut published = Vec::new();
+                        nested_expr.clear();
+                        push_expr(&mut nested_expr, "query-producer", &[proof_id]);
+                        add_expr.clear();
                         push_expr(
-                            &mut published,
+                            &mut add_expr,
                             "open-proof",
-                            &[producer[2], stv, &published_proof, evset],
+                            &[producer[2], stv, &nested_expr, evset],
                         );
-                        add.insert(&published, ());
+                        add.insert(&add_expr, ());
 
                         let mut downstreams = Vec::new();
                         if collect_pcons(producer[4], &mut downstreams) {
                             for downstream in downstreams {
-                                let mut downstream_goal = Vec::new();
-                                push_expr(&mut downstream_goal, "Goal", &[&downstream]);
-                                let mut token = Vec::new();
-                                push_expr(&mut token, ",", &[&downstream_goal]);
-                                add.insert(&token, ());
+                                nested_expr.clear();
+                                push_expr(&mut nested_expr, "Goal", &[&downstream]);
+                                add_expr.clear();
+                                push_expr(&mut add_expr, ",", &[&nested_expr]);
+                                add.insert(&add_expr, ());
                             }
                         }
                     }
                 }
 
-                if factored.is_none() && canonical_current_proofs.contains(&current) {
+                if !has_factored && is_canonical(proof_id) {
                     merged = Some(match merged {
                         Some((ref old_stv, ref old_ev))
                             if is_inversion_snapshot_proof(proof_id)
@@ -3560,17 +3589,17 @@ impl Sink for ReviseProofsSink {
                 }
             }
             if let Some((stv, evset)) = merged {
-                let mut fact = Vec::new();
-                push_expr(&mut fact, "fact", &[goal, &stv[..]]);
-                add.insert(&fact[..], ());
+                add_expr.clear();
+                push_expr(&mut add_expr, "fact", &[goal, &stv[..]]);
+                add.insert(&add_expr[..], ());
 
-                let mut fact_evidence = Vec::new();
+                add_expr.clear();
                 push_expr(
-                    &mut fact_evidence,
+                    &mut add_expr,
                     "fact-evidence",
                     &[goal, &stv[..], &evset[..]],
                 );
-                add.insert(&fact_evidence[..], ());
+                add.insert(&add_expr[..], ());
             }
         }
 
