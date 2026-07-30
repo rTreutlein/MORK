@@ -196,9 +196,22 @@ mod tests {
         space
             .add_batch(b"(seed a)\n(exec 0 (, (seed $x)) (O (+ (seen $x))))")
             .unwrap();
+        space.set_timing(true);
         let stats = space.execute(1);
         assert_eq!(stats.steps, 1);
         assert!(stats.transitions > 0);
+        assert!(stats.sink_timings.iter().any(|timing| {
+            timing.stage == "add"
+                && timing.phase == "consume"
+                && timing.calls == 1
+                && timing.elapsed_ns > 0
+        }));
+        assert!(stats.sink_timings.iter().any(|timing| {
+            timing.stage == "runtime"
+                && timing.phase == "multi-output"
+                && timing.calls == 1
+                && timing.elapsed_ns > 0
+        }));
         space.remove_batch(b"(seed a)").unwrap();
         let output = String::from_utf8(space.dump_all().unwrap()).unwrap();
         assert!(!output.contains("(seed a)"), "{output}");
