@@ -25,7 +25,7 @@ use mork_frontend::json_parser::Transcriber;
 use log::*;
 use subprocess::{Popen, PopenConfig, Redirection};
 use subprocess::unix::PopenExt;
-use crate::sinks::{WriteResource, WriteResourceRequest};
+use crate::sinks::{SinkProfileSpan, WriteResource, WriteResourceRequest};
 use crate::sources::{AFactor, Resource, ResourceRequest};
 
 pub static mut transitions: usize = 0;
@@ -1713,10 +1713,22 @@ impl Space {
 
             #[cfg(feature="specialize_io")]
             let res = match (*pat_expr.ptr.add(2), *tpl_expr.ptr.add(2)) {
-                (b',', b',') => { self.transform_multi_multi_(pat_expr, tpl_expr, rt) }
-                (b'I', b',') => { self.transform_multi_multi_i(pat_expr, tpl_expr, rt) }
-                (b',', b'O') => { self.transform_multi_multi_o(pat_expr, tpl_expr, rt) }
-                (b'I', b'O') => { self.transform_multi_multi_io(pat_expr, tpl_expr, rt, false, false) }
+                (b',', b',') => {
+                    let _span = SinkProfileSpan::new("runtime", "multi-multi");
+                    self.transform_multi_multi_(pat_expr, tpl_expr, rt)
+                }
+                (b'I', b',') => {
+                    let _span = SinkProfileSpan::new("runtime", "multi-input");
+                    self.transform_multi_multi_i(pat_expr, tpl_expr, rt)
+                }
+                (b',', b'O') => {
+                    let _span = SinkProfileSpan::new("runtime", "multi-output");
+                    self.transform_multi_multi_o(pat_expr, tpl_expr, rt)
+                }
+                (b'I', b'O') => {
+                    let _span = SinkProfileSpan::new("runtime", "input-output");
+                    self.transform_multi_multi_io(pat_expr, tpl_expr, rt, false, false)
+                }
                 (_, _) => { return Err("pattern functor can only be , or I and template functor can only be , or O") }
             };
             #[cfg(not(feature="specialize_io"))]
@@ -1738,17 +1750,20 @@ impl Space {
         const PREFIX: [u8; 6] = const { [item_byte(Tag::Arity(4)), item_byte(Tag::SymbolSize(4)), b'e', b'x', b'e', b'c' ] };
 
         while {
+            let select_span = SinkProfileSpan::new("runtime", "select-executor");
             let mut rz = self.btm.read_zipper_at_borrowed_path(&PREFIX[..]);
             if rz.to_next_val() {
                 // cannot be here `rz` conflicts potentially with zippers(rz.path())
                 let mut x: Vec<u8> = rz.into_path(); // should use local buffer
                 self.btm.remove(&x[..]);
+                drop(select_span);
                 let mut xe = Expr{ ptr: x.as_mut_ptr() };
                 let start = Instant::now();
                 if let Err(e) = self.interpret(xe) {
                     debug!(target: "interpret", "not interpreting: {}", e);
                 }
                 if self.timing {
+                    let _timing_span = SinkProfileSpan::new("runtime", "record-timing");
                     let start_string = start.elapsed().as_nanos().to_string();
                     let start_str = start_string.as_str();
                     let done_string = done.to_string();

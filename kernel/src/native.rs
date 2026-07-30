@@ -8,12 +8,21 @@ use crate::space::{
     ParDataParser, Space, fused_rule_candidates, fused_rule_rows, fused_rule_unifications,
     head_source_candidates, head_source_rows, transitions, unifications, writes,
 };
+use crate::sinks::{reset_sink_profiling, take_sink_timings};
 use mork_expr::{Expr, ExprZipper};
 use mork_frontend::bytestring_parser::{Context, Parser};
 use std::sync::Mutex;
 use std::time::Instant;
 
 static EXECUTION_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StageTiming {
+    pub stage: String,
+    pub phase: String,
+    pub calls: usize,
+    pub elapsed_ns: u128,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExecutionStats {
@@ -27,6 +36,7 @@ pub struct ExecutionStats {
     pub head_source_candidates: usize,
     pub head_source_rows: usize,
     pub elapsed_ns: u128,
+    pub sink_timings: Vec<StageTiming>,
 }
 
 pub struct NativeSpace {
@@ -75,7 +85,17 @@ impl NativeSpace {
             )
         };
         let started = Instant::now();
+        reset_sink_profiling(self.space.timing);
         let steps = self.space.metta_calculus(step_budget);
+        let sink_timings = take_sink_timings()
+            .into_iter()
+            .map(|timing| StageTiming {
+                stage: timing.sink.to_owned(),
+                phase: timing.phase.to_owned(),
+                calls: timing.calls,
+                elapsed_ns: timing.elapsed_ns,
+            })
+            .collect();
         let elapsed_ns = started.elapsed().as_nanos();
         let after = unsafe {
             (
@@ -100,6 +120,7 @@ impl NativeSpace {
             head_source_candidates: after.6.saturating_sub(before.6),
             head_source_rows: after.7.saturating_sub(before.7),
             elapsed_ns,
+            sink_timings,
         }
     }
 

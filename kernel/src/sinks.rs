@@ -21,6 +21,7 @@ use pathmap::ring::{AlgebraicStatus, Lattice};
 use pathmap::utils::{BitMask, ByteMask};
 use pathmap::zipper::*;
 use std::any::Any;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
@@ -32,10 +33,88 @@ use std::mem::MaybeUninit;
 use std::ops::{AddAssign, Coroutine, CoroutineState, MulAssign};
 use std::pin::Pin;
 use std::ptr::{addr_of, null, null_mut, slice_from_raw_parts, slice_from_raw_parts_mut};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::LazyLock;
 use std::task::Poll;
 use std::time::Instant;
 use std::{mem, process, ptr};
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SinkTiming {
+    pub sink: &'static str,
+    pub phase: &'static str,
+    pub calls: usize,
+    pub elapsed_ns: u128,
+}
+
+static SINK_PROFILING_ENABLED: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    static SINK_TIMINGS: RefCell<BTreeMap<(&'static str, &'static str), (usize, u128)>> =
+        RefCell::new(BTreeMap::new());
+}
+
+pub(crate) fn reset_sink_profiling(enabled: bool) {
+    SINK_PROFILING_ENABLED.store(false, AtomicOrdering::Relaxed);
+    SINK_TIMINGS.with(|timings| timings.borrow_mut().clear());
+    SINK_PROFILING_ENABLED.store(enabled, AtomicOrdering::Relaxed);
+}
+
+pub(crate) fn take_sink_timings() -> Vec<SinkTiming> {
+    SINK_PROFILING_ENABLED.store(false, AtomicOrdering::Relaxed);
+    SINK_TIMINGS.with(|timings| {
+        std::mem::take(&mut *timings.borrow_mut())
+            .into_iter()
+            .map(|((sink, phase), (calls, elapsed_ns))| SinkTiming {
+                sink,
+                phase,
+                calls,
+                elapsed_ns,
+            })
+            .collect()
+    })
+}
+
+fn sink_profiling_enabled() -> bool {
+    SINK_PROFILING_ENABLED.load(AtomicOrdering::Relaxed)
+}
+
+fn record_sink_timing(
+    sink: &'static str,
+    phase: &'static str,
+    elapsed_ns: u128,
+) {
+    SINK_TIMINGS.with(|timings| {
+        let mut timings = timings.borrow_mut();
+        let timing = timings.entry((sink, phase)).or_default();
+        timing.0 += 1;
+        timing.1 += elapsed_ns;
+    });
+}
+
+pub(crate) struct SinkProfileSpan {
+    sink: &'static str,
+    phase: &'static str,
+    started: Option<Instant>,
+}
+
+impl SinkProfileSpan {
+    pub(crate) fn new(sink: &'static str, phase: &'static str) -> Self {
+        Self {
+            sink,
+            phase,
+            started: sink_profiling_enabled().then(Instant::now),
+        }
+    }
+}
+
+impl Drop for SinkProfileSpan {
+    fn drop(&mut self) {
+        if let Some(started) = self.started {
+            record_sink_timing(self.sink, self.phase, started.elapsed().as_nanos());
+        }
+    }
+}
 
 #[derive(Eq, PartialEq, Debug)]
 pub enum WriteResourceRequest {
@@ -3679,6 +3758,7 @@ impl Sink for ScheduleRulesSink {
             let Some(goal_head) = goal_args.first() else {
                 continue;
             };
+            let goal_lookup_span = SinkProfileSpan::new("schedule-rules", "goal-lookup");
             let has_goal_bucket = |name: &str, arity: u8| {
                 let base = expr_prefix(name, arity, &[]);
                 let mut exact = base.clone();
@@ -3719,11 +3799,14 @@ impl Sink for ScheduleRulesSink {
                     let mut rz = wz.fork_read_zipper();
                     rz.descend_to_existing(prefix) == prefix.len()
                 });
+            drop(goal_lookup_span);
             while rz.to_next_val() {
                 let path = rz.origin_path();
                 if !path.starts_with(&prefix) {
                     break;
                 }
+                let candidate_match_span =
+                    SinkProfileSpan::new("schedule-rules", "candidate-match");
                 let rule_expr = Expr {
                     ptr: path.as_ptr().cast_mut(),
                 };
@@ -3751,6 +3834,9 @@ impl Sink for ScheduleRulesSink {
                 let Ok(bindings) = unify(&mut pairs) else {
                     continue;
                 };
+                drop(candidate_match_span);
+
+                let instantiate_span = SinkProfileSpan::new("schedule-rules", "instantiate");
                 instantiated_rule.clear();
                 let rule_env = ExprEnv::new(0, rule_expr);
                 let (_, _, acyclic) = mork_expr::apply_e_clears_stacks_and_cycles_check!(
@@ -3784,6 +3870,9 @@ impl Sink for ScheduleRulesSink {
                 }
 
                 let confidence = stv_f64(stv[1], "rule confidence");
+                drop(instantiate_span);
+
+                let _emit_span = SinkProfileSpan::new("schedule-rules", "emit");
                 let priority = priority_cache.entry(stv[1].to_vec()).or_insert_with(|| {
                     let text = hex::encode(binary_f64_symbol(1.0 - confidence));
                     symbol_bytes(&text)
@@ -3821,17 +3910,21 @@ impl Sink for ScheduleRulesSink {
         }
 
         self.goals.clear();
+        let subtract_span = SinkProfileSpan::new("schedule-rules", "subtract");
         let removed = match wz.subtract_into(&remove.read_zipper(), true) {
             AlgebraicStatus::Element => true,
             AlgebraicStatus::Identity => false,
             AlgebraicStatus::None => true,
         };
+        drop(subtract_span);
         wz.reset();
+        let join_span = SinkProfileSpan::new("schedule-rules", "join");
         let added = match wz.join_into(&add.read_zipper()) {
             AlgebraicStatus::Element => true,
             AlgebraicStatus::Identity => false,
             AlgebraicStatus::None => true,
         };
+        drop(join_span);
         removed || added
     }
 }
@@ -5253,6 +5346,44 @@ impl ASink {
     pub fn compat(e: Expr) -> Self {
         ASink::CompatSink(CompatSink::new(e))
     }
+
+    fn profile_name(&self) -> &'static str {
+        match self {
+            ASink::AddSink(_) => "add",
+            ASink::RemoveSink(_) => "remove",
+            ASink::HeadSink(_) => "head",
+            ASink::TailSink(_) => "tail",
+            ASink::SimpleReviseProofsSink(_) => "revise-proofs-simple",
+            ASink::ReviseProofsSink(_) => "revise-proofs",
+            ASink::ScheduleRulesSink(_) => "schedule-rules",
+            ASink::ContributionSink(_) => "contribution",
+            ASink::BaseRateSink(_) => "base-rate",
+            ASink::PriorRuleStvSink(_) => "prior-rule-stv",
+            ASink::PairCountsSink(_) => "pair-counts",
+            ASink::DistAverageSink(_) => "dist-average",
+            ASink::DistSumSink(_) => "dist-sum",
+            ASink::OrStvSink(_) => "or-stv",
+            ASink::TotalEvidenceMpSink(_) => "total-evidence-mp",
+            ASink::CountSink(_) => "count",
+            ASink::HashSink(_) => "hash",
+            ASink::SumSink(_) => "sum",
+            ASink::AndSink(_) => "and",
+            ASink::ACTSink(_) => "act",
+            #[cfg(feature = "wasm")]
+            ASink::WASMSink(_) => "wasm",
+            #[cfg(feature = "grounding")]
+            ASink::PureSink(_) => "pure",
+            #[cfg(feature = "z3")]
+            ASink::Z3Sink(_) => "z3",
+            ASink::AUSink(_) => "anti-unify",
+            ASink::USink(_) => "unify",
+            ASink::CompatSink(_) => "compat",
+            ASink::FSumSink(_) => "float-sum",
+            ASink::FMinSink(_) => "float-min",
+            ASink::FMaxSink(_) => "float-max",
+            ASink::FProdSink(_) => "float-product",
+        }
+    }
 }
 
 impl Sink for ASink {
@@ -5664,6 +5795,9 @@ impl Sink for ASink {
         'a: 'w,
         'k: 'w,
     {
+        let profile = sink_profiling_enabled();
+        let profile_name = profile.then(|| self.profile_name());
+        let started = profile.then(Instant::now);
         match self {
             ASink::AddSink(s) => s.sink(it, path),
             ASink::USink(s) => s.sink(it, path),
@@ -5699,6 +5833,9 @@ impl Sink for ASink {
             ASink::FMaxSink(s) => s.sink(it, path),
             ASink::FProdSink(s) => s.sink(it, path),
         }
+        if let (Some(profile_name), Some(started)) = (profile_name, started) {
+            record_sink_timing(profile_name, "consume", started.elapsed().as_nanos());
+        }
     }
 
     fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
@@ -5709,7 +5846,10 @@ impl Sink for ASink {
         'a: 'w,
         'k: 'w,
     {
-        match self {
+        let profile = sink_profiling_enabled();
+        let profile_name = profile.then(|| self.profile_name());
+        let started = profile.then(Instant::now);
+        let changed = match self {
             ASink::AddSink(s) => s.finalize(it),
             ASink::USink(s) => s.finalize(it),
             ASink::AUSink(s) => s.finalize(it),
@@ -5743,6 +5883,10 @@ impl Sink for ASink {
             ASink::FMinSink(s) => s.finalize(it),
             ASink::FMaxSink(s) => s.finalize(it),
             ASink::FProdSink(s) => s.finalize(it),
+        };
+        if let (Some(profile_name), Some(started)) = (profile_name, started) {
+            record_sink_timing(profile_name, "finalize", started.elapsed().as_nanos());
         }
+        changed
     }
 }
