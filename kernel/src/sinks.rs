@@ -9,8 +9,8 @@ use futures::StreamExt;
 use log::*;
 use mork_expr::macros::SerializableExpr;
 use mork_expr::{
-    binary_f64_symbol, tagged_binary_f64, Expr, ExprEnv, ExprZipper, ExtractFailure, Tag,
-    UnificationFailure, apply, byte_item, destruct, item_byte, parse, serialize, traverseh, unify,
+    Expr, ExprEnv, ExprZipper, ExtractFailure, Tag, UnificationFailure, apply, byte_item, destruct,
+    item_byte, parse, serialize, traverseh, unify,
 };
 use mork_frontend::bytestring_parser::{Context, Parser, ParserError};
 use mork_frontend::json_parser::Transcriber;
@@ -33,8 +33,8 @@ use std::mem::MaybeUninit;
 use std::ops::{AddAssign, Coroutine, CoroutineState, MulAssign};
 use std::pin::Pin;
 use std::ptr::{addr_of, null, null_mut, slice_from_raw_parts, slice_from_raw_parts_mut};
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::task::Poll;
 use std::time::Instant;
 use std::{mem, process, ptr};
@@ -79,11 +79,7 @@ fn sink_profiling_enabled() -> bool {
     SINK_PROFILING_ENABLED.load(AtomicOrdering::Relaxed)
 }
 
-fn record_sink_timing(
-    sink: &'static str,
-    phase: &'static str,
-    elapsed_ns: u128,
-) {
+fn record_sink_timing(sink: &'static str, phase: &'static str, elapsed_ns: u128) {
     SINK_TIMINGS.with(|timings| {
         let mut timings = timings.borrow_mut();
         let timing = timings.entry((sink, phase)).or_default();
@@ -97,11 +93,7 @@ fn record_sink_count(sink: &'static str, phase: &'static str, calls: usize) {
         return;
     }
     SINK_TIMINGS.with(|timings| {
-        timings
-            .borrow_mut()
-            .entry((sink, phase))
-            .or_default()
-            .0 += calls;
+        timings.borrow_mut().entry((sink, phase)).or_default().0 += calls;
     });
 }
 
@@ -677,8 +669,15 @@ impl Sink for RemoveSink {
     }
 }
 
-pub struct HeadTailSink<const head: bool> { e: Expr, extrema: PathMap<()>, skip: usize, count: usize, max: usize, extremum: Vec<u8> }
-impl <const head: bool> Sink for HeadTailSink<head> {
+pub struct HeadTailSink<const head: bool> {
+    e: Expr,
+    extrema: PathMap<()>,
+    skip: usize,
+    count: usize,
+    max: usize,
+    extremum: Vec<u8>,
+}
+impl<const head: bool> Sink for HeadTailSink<head> {
     fn new(e: Expr) -> Self {
         let mut ez = ExprZipper::new(e);
         ez.next();
@@ -692,19 +691,48 @@ impl <const head: bool> Sink for HeadTailSink<head> {
             .parse()
             .expect("a number");
         assert_ne!(max, 0);
-        Self { e, extrema: PathMap::new(), skip: 1 + 1+4 + 1+max_s.len(), count: 0, max, extremum: vec![] }
+        Self {
+            e,
+            extrema: PathMap::new(),
+            skip: 1 + 1 + 4 + 1 + max_s.len(),
+            count: 0,
+            max,
+            extremum: vec![],
+        }
     }
-    fn request(&self) ->  impl Iterator<Item=WriteResourceRequest> {
-        let p = &unsafe { self.e.prefix().unwrap_or_else(|x| { let s = self.e.span(); slice_from_raw_parts(self.e.ptr, s.len() - 1) }).as_ref().unwrap() }[self.skip..];
+    fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
+        let p = &unsafe {
+            self.e
+                .prefix()
+                .unwrap_or_else(|x| {
+                    let s = self.e.span();
+                    slice_from_raw_parts(self.e.ptr, s.len() - 1)
+                })
+                .as_ref()
+                .unwrap()
+        }[self.skip..];
         trace!(target: "sink", "head/tail requesting {}", serialize(p));
         std::iter::once(WriteResourceRequest::BTM(p))
     }
-    fn sink<'w, 'a, 'k, It : Iterator<Item=WriteResource<'w, 'a, 'k>>>(&mut self, mut it: It, path: &[u8]) where 'a : 'w, 'k : 'w {
-        let WriteResource::BTM(wz) = it.next().unwrap() else { unreachable!() };
-        let mpath = &path[self.skip+wz.root_prefix_path().len()..];
+    fn sink<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+        path: &[u8],
+    ) where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        let mpath = &path[self.skip + wz.root_prefix_path().len()..];
         trace!(target: "sink", "head/tail at '{}' sinking raw '{}'", serialize(wz.root_prefix_path()), serialize(path));
         if self.count == self.max {
-            if (if head { &self.extremum[..] <= mpath } else { &self.extremum[..] >= mpath }) {
+            if (if head {
+                &self.extremum[..] <= mpath
+            } else {
+                &self.extremum[..] >= mpath
+            }) {
                 trace!(target: "sink", "head/tail at max capacity ignoring '{}'", serialize(mpath));
                 // doesn't displace any path
             } else {
@@ -712,8 +740,11 @@ impl <const head: bool> Sink for HeadTailSink<head> {
                 assert!(self.extrema.insert(mpath, ()).is_none());
                 self.extrema.remove(&self.extremum[..]);
                 let mut rz = self.extrema.read_zipper();
-                if head { rz.descend_last_path(); }
-                else { rz.to_next_val(); }
+                if head {
+                    rz.descend_last_path();
+                } else {
+                    rz.to_next_val();
+                }
                 self.extremum.clear();
                 self.extremum.extend_from_slice(rz.path()); // yikes, throwing away our needless allocation
             }
@@ -722,7 +753,11 @@ impl <const head: bool> Sink for HeadTailSink<head> {
                 trace!(target: "sink", "head/tail adding '{}'", serialize(mpath));
                 self.count += 1;
                 let update = self.extremum.is_empty()
-                    || if head { &self.extremum[..] < mpath } else { mpath < &self.extremum[..] };
+                    || if head {
+                        &self.extremum[..] < mpath
+                    } else {
+                        mpath < &self.extremum[..]
+                    };
                 if update {
                     self.extremum.clear();
                     self.extremum.extend_from_slice(mpath);
@@ -745,9 +780,9 @@ impl <const head: bool> Sink for HeadTailSink<head> {
         trace!(target: "sink", "head/tail finalizing by joining {} at '{}'", self.count, serialize(wz.origin_path()));
 
         match wz.join_into(&self.extrema.read_zipper()) {
-            AlgebraicStatus::Element => { true }
-            AlgebraicStatus::Identity => { false }
-            AlgebraicStatus::None => { true } // GOAT maybe not?
+            AlgebraicStatus::Element => true,
+            AlgebraicStatus::Identity => false,
+            AlgebraicStatus::None => true, // GOAT maybe not?
         }
     }
 }
@@ -780,13 +815,7 @@ fn symbol_bytes(s: &str) -> Vec<u8> {
 }
 
 fn push_expr(out: &mut Vec<u8>, name: &str, args: &[&[u8]]) {
-    out.reserve(
-        2 + name.len()
-            + args
-                .iter()
-                .map(|arg| arg.len())
-                .sum::<usize>(),
-    );
+    out.reserve(2 + name.len() + args.iter().map(|arg| arg.len()).sum::<usize>());
     out.push(item_byte(Tag::Arity((args.len() + 1) as u8)));
     out.push(item_byte(Tag::SymbolSize(name.len() as u8)));
     out.extend_from_slice(name.as_bytes());
@@ -817,18 +846,43 @@ fn expr_len(bytes: &[u8]) -> usize {
     }
 }
 
-fn expr_args(bytes: &[u8]) -> Vec<&[u8]> {
+struct ExprArgsIter<'a> {
+    bytes: &'a [u8],
+    remaining: u8,
+    pos: usize,
+}
+
+impl<'a> Iterator for ExprArgsIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let len = expr_len(&self.bytes[self.pos..]);
+        let arg = &self.bytes[self.pos..self.pos + len];
+        self.pos += len;
+        self.remaining -= 1;
+        Some(arg)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.remaining as usize;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for ExprArgsIter<'_> {}
+
+fn expr_args_iter(bytes: &[u8]) -> ExprArgsIter<'_> {
     let Tag::Arity(arity) = byte_item(bytes[0]) else {
         panic!("expected expression, got {}", serialize(bytes));
     };
-    let mut args = Vec::with_capacity(arity as usize);
-    let mut pos = 1;
-    for _ in 0..arity {
-        let len = expr_len(&bytes[pos..]);
-        args.push(&bytes[pos..pos + len]);
-        pos += len;
+    ExprArgsIter {
+        bytes,
+        remaining: arity,
+        pos: 1,
     }
-    args
 }
 
 fn expr_args_exact<const N: usize>(bytes: &[u8]) -> Option<[&[u8]; N]> {
@@ -848,6 +902,24 @@ fn expr_args_exact<const N: usize>(bytes: &[u8]) -> Option<[&[u8]; N]> {
     Some(args)
 }
 
+fn expr_args_bounded<const N: usize>(bytes: &[u8]) -> Option<([&[u8]; N], usize)> {
+    let Tag::Arity(arity) = byte_item(bytes[0]) else {
+        return None;
+    };
+    let len = arity as usize;
+    if len > N {
+        return None;
+    }
+    let mut args = [&[][..]; N];
+    let mut pos = 1;
+    for arg in &mut args[..len] {
+        let arg_len = expr_len(&bytes[pos..]);
+        *arg = &bytes[pos..pos + arg_len];
+        pos += arg_len;
+    }
+    Some((args, len))
+}
+
 fn symbol_str(bytes: &[u8]) -> &str {
     let Tag::SymbolSize(size) = byte_item(bytes[0]) else {
         panic!("expected symbol, got {}", serialize(bytes));
@@ -863,8 +935,7 @@ fn is_symbol(bytes: &[u8], name: &str) -> bool {
 }
 
 fn stv_parts(stv: &[u8]) -> (f64, f64) {
-    let args = expr_args(stv);
-    assert_eq!(args.len(), 2, "stv must have strength and confidence");
+    let args = expr_args_exact::<2>(stv).expect("stv must have strength and confidence");
     (stv_f64(args[0], "strength"), stv_f64(args[1], "confidence"))
 }
 
@@ -872,40 +943,77 @@ fn stv_f64(symbol: &[u8], field: &str) -> f64 {
     try_f64_symbol(symbol).unwrap_or_else(|| panic!("{field} must be textual or binary f64"))
 }
 
+const BINARY_F64_MARKER: u8 = 0xff;
+
+fn binary_f64_symbol(value: f64) -> Vec<u8> {
+    let raw = value.to_be_bytes();
+    let ambiguous_text = std::str::from_utf8(&raw).is_ok()
+        && (raw.iter().all(|byte| !byte.is_ascii_control())
+            || (raw.first() == Some(&b'"') && raw.last() == Some(&b'"')));
+    if ambiguous_text {
+        let mut out = Vec::with_capacity(9);
+        out.push(BINARY_F64_MARKER);
+        out.extend_from_slice(&raw);
+        out
+    } else {
+        raw.to_vec()
+    }
+}
+
+fn tagged_binary_f64(bytes: &[u8]) -> Option<f64> {
+    if bytes.len() != 9 || bytes[0] != BINARY_F64_MARKER {
+        return None;
+    }
+    Some(f64::from_be_bytes(bytes[1..].try_into().ok()?))
+}
+
 fn try_f64_symbol(symbol: &[u8]) -> Option<f64> {
-    let Tag::SymbolSize(size) = byte_item(symbol[0]) else { return None };
+    let Tag::SymbolSize(size) = byte_item(symbol[0]) else {
+        return None;
+    };
     try_f64_bytes(&symbol[1..1 + size as usize])
 }
 
 fn try_f64_bytes(bytes: &[u8]) -> Option<f64> {
     if let Ok(text) = str::from_utf8(bytes) {
         if let Ok(value) = text.parse::<f64>() {
-            return value.is_finite().then_some(if value == 0.0 { 0.0 } else { value });
+            return value
+                .is_finite()
+                .then_some(if value == 0.0 { 0.0 } else { value });
         }
     }
     if let Some(value) = tagged_binary_f64(bytes) {
-        return value.is_finite().then_some(if value == 0.0 { 0.0 } else { value });
+        return value
+            .is_finite()
+            .then_some(if value == 0.0 { 0.0 } else { value });
     }
     let value = f64::from_be_bytes(bytes.try_into().ok()?);
-    value.is_finite().then_some(if value == 0.0 { 0.0 } else { value })
+    value
+        .is_finite()
+        .then_some(if value == 0.0 { 0.0 } else { value })
 }
 
-fn binary_f64_bytes(value: f64, field: &str) -> Vec<u8> {
+fn push_binary_f64(out: &mut Vec<u8>, value: f64, field: &str) {
     assert!(value.is_finite(), "{field} must be finite");
     let value = if value == 0.0 { 0.0 } else { value };
-    let payload = binary_f64_symbol(value);
-    let mut out = vec![item_byte(Tag::SymbolSize(payload.len() as u8))];
-    out.extend_from_slice(&payload);
-    out
+    let raw = value.to_be_bytes();
+    let ambiguous_text = std::str::from_utf8(&raw).is_ok()
+        && (raw.iter().all(|byte| !byte.is_ascii_control())
+            || (raw.first() == Some(&b'"') && raw.last() == Some(&b'"')));
+    if ambiguous_text {
+        out.push(item_byte(Tag::SymbolSize(9)));
+        out.push(BINARY_F64_MARKER);
+    } else {
+        out.push(item_byte(Tag::SymbolSize(8)));
+    }
+    out.extend_from_slice(&raw);
 }
 
 fn stv_bytes(strength: f64, confidence: f64) -> Vec<u8> {
-    let strength_s = binary_f64_bytes(strength, "strength");
-    let confidence_s = binary_f64_bytes(confidence, "confidence");
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(19);
     out.push(item_byte(Tag::Arity(2)));
-    out.extend_from_slice(&strength_s);
-    out.extend_from_slice(&confidence_s);
+    push_binary_f64(&mut out, strength, "strength");
+    push_binary_f64(&mut out, confidence, "confidence");
     out
 }
 
@@ -928,25 +1036,72 @@ fn revise_stv(old: &[u8], new: &[u8]) -> Vec<u8> {
     stv_bytes(strength, confidence)
 }
 
-fn collect_evidence(bytes: &[u8], out: &mut BTreeSet<Vec<u8>>) {
+fn visit_evidence<'a>(bytes: &'a [u8], visitor: &mut impl FnMut(&'a [u8]) -> bool) -> bool {
     if is_symbol(bytes, "pnil") {
-        return;
+        return true;
     }
-    if let Tag::Arity(_) = byte_item(bytes[0]) {
-        let args = expr_args(bytes);
-        if args.len() == 3 && is_symbol(args[0], "pcons") {
-            collect_evidence(args[1], out);
-            collect_evidence(args[2], out);
-            return;
-        }
+    if let Some([name, item, tail]) = expr_args_exact::<3>(bytes)
+        && is_symbol(name, "pcons")
+    {
+        return visit_evidence(item, visitor) && visit_evidence(tail, visitor);
     }
-    out.insert(bytes.to_vec());
+    visitor(bytes)
+}
+
+fn collect_evidence(bytes: &[u8], out: &mut BTreeSet<Vec<u8>>) {
+    visit_evidence(bytes, &mut |item| {
+        out.insert(item.to_vec());
+        true
+    });
 }
 
 fn evidence_set(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
     let mut out = BTreeSet::new();
     collect_evidence(bytes, &mut out);
     out
+}
+
+struct InlineVec<T: Copy, const N: usize> {
+    inline: [Option<T>; N],
+    inline_len: usize,
+    overflow: Vec<T>,
+}
+
+impl<T: Copy, const N: usize> InlineVec<T, N> {
+    fn new() -> Self {
+        Self {
+            inline: [None; N],
+            inline_len: 0,
+            overflow: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, value: T) {
+        if self.inline_len < N {
+            self.inline[self.inline_len] = Some(value);
+            self.inline_len += 1;
+        } else {
+            self.overflow.push(value);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.inline_len + self.overflow.len()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = T> + '_ {
+        self.inline[..self.inline_len]
+            .iter()
+            .map(|value| value.expect("initialized inline item"))
+            .chain(self.overflow.iter().copied())
+    }
+
+    fn contains(&self, value: &T) -> bool
+    where
+        T: PartialEq,
+    {
+        self.iter().any(|item| item == *value)
+    }
 }
 
 fn is_variable_expr(bytes: &[u8]) -> bool {
@@ -957,32 +1112,26 @@ fn is_variable_expr(bytes: &[u8]) -> bool {
     }
 }
 
-fn alpha_equiv_inner(
-    left: &[u8],
-    right: &[u8],
-    left_to_right: &mut BTreeMap<Vec<u8>, Vec<u8>>,
-    right_to_left: &mut BTreeMap<Vec<u8>, Vec<u8>>,
+fn alpha_equiv_inner<'a>(
+    left: &'a [u8],
+    right: &'a [u8],
+    variables: &mut InlineVec<(&'a [u8], &'a [u8]), 8>,
 ) -> bool {
     match (byte_item(left[0]), byte_item(right[0])) {
         (Tag::Arity(left_arity), Tag::Arity(right_arity)) if left_arity == right_arity => {
-            let left_args = expr_args(left);
-            let right_args = expr_args(right);
-            left_args
-                .iter()
-                .zip(right_args.iter())
-                .all(|(l, r)| alpha_equiv_inner(l, r, left_to_right, right_to_left))
+            expr_args_iter(left)
+                .zip(expr_args_iter(right))
+                .all(|(l, r)| alpha_equiv_inner(l, r, variables))
         }
         (_, _) if is_variable_expr(left) && is_variable_expr(right) => {
-            match (left_to_right.get(left), right_to_left.get(right)) {
-                (Some(mapped), Some(reverse)) => mapped == right && reverse == left,
-                (Some(mapped), None) => mapped == right,
-                (None, Some(reverse)) => reverse == left,
-                (None, None) => {
-                    left_to_right.insert(left.to_vec(), right.to_vec());
-                    right_to_left.insert(right.to_vec(), left.to_vec());
-                    true
-                }
+            if let Some((_, mapped)) = variables.iter().find(|(source, _)| *source == left) {
+                return mapped == right;
             }
+            if variables.iter().any(|(_, mapped)| mapped == right) {
+                return false;
+            }
+            variables.push((left, right));
+            true
         }
         (Tag::SymbolSize(_), Tag::SymbolSize(_))
             if !is_variable_expr(left) && !is_variable_expr(right) =>
@@ -994,30 +1143,25 @@ fn alpha_equiv_inner(
 }
 
 fn alpha_equiv(left: &[u8], right: &[u8]) -> bool {
-    alpha_equiv_inner(left, right, &mut BTreeMap::new(), &mut BTreeMap::new())
+    alpha_equiv_inner(left, right, &mut InlineVec::new())
 }
 
-fn pattern_instance_inner(
-    pattern: &[u8],
-    value: &[u8],
-    bindings: &mut BTreeMap<Vec<u8>, Vec<u8>>,
+fn pattern_instance_inner<'a>(
+    pattern: &'a [u8],
+    value: &'a [u8],
+    bindings: &mut InlineVec<(&'a [u8], &'a [u8]), 8>,
 ) -> bool {
     if is_variable_expr(pattern) {
-        return match bindings.get(pattern) {
-            Some(bound) => bound == value,
-            None => {
-                bindings.insert(pattern.to_vec(), value.to_vec());
-                true
-            }
-        };
+        if let Some((_, bound)) = bindings.iter().find(|(variable, _)| *variable == pattern) {
+            return bound == value;
+        }
+        bindings.push((pattern, value));
+        return true;
     }
     match (byte_item(pattern[0]), byte_item(value[0])) {
-        (Tag::Arity(pattern_arity), Tag::Arity(value_arity))
-            if pattern_arity == value_arity =>
-        {
-            expr_args(pattern)
-                .iter()
-                .zip(expr_args(value).iter())
+        (Tag::Arity(pattern_arity), Tag::Arity(value_arity)) if pattern_arity == value_arity => {
+            expr_args_iter(pattern)
+                .zip(expr_args_iter(value))
                 .all(|(p, v)| pattern_instance_inner(p, v, bindings))
         }
         (Tag::SymbolSize(_), Tag::SymbolSize(_)) => pattern == value,
@@ -1026,115 +1170,205 @@ fn pattern_instance_inner(
 }
 
 fn pattern_instance(pattern: &[u8], value: &[u8]) -> bool {
-    pattern_instance_inner(pattern, value, &mut BTreeMap::new())
+    pattern_instance_inner(pattern, value, &mut InlineVec::new())
 }
 
 fn evidence_contains_rule(evidence: &[u8], rule: &[u8], allow_instance: bool) -> bool {
-    evidence_set(evidence).iter().any(|item| {
+    let mut found = false;
+    visit_evidence(evidence, &mut |item| {
         if let Tag::Arity(_) = byte_item(item[0]) {
-            let args = expr_args(item);
-            args.len() == 2
-                && is_symbol(args[0], "rule-ev")
-                && (alpha_equiv(args[1], rule)
-                    || (allow_instance && pattern_instance(rule, args[1])))
+            if let Some([name, evidence_rule]) = expr_args_exact::<2>(item)
+                && is_symbol(name, "rule-ev")
+                && (alpha_equiv(evidence_rule, rule)
+                    || (allow_instance && pattern_instance(rule, evidence_rule)))
+            {
+                found = true;
+                return false;
+            }
+            true
         } else {
-            false
+            true
         }
-    })
+    });
+    found
 }
 
-fn evidence_list(set: &BTreeSet<Vec<u8>>) -> Vec<u8> {
-    let mut out = symbol_bytes("pnil");
-    for item in set.iter().rev() {
-        let mut next = Vec::new();
-        push_expr(&mut next, "pcons", &[item, &out]);
-        out = next;
+fn evidence_list(items: &[&[u8]]) -> Vec<u8> {
+    const PCONS_PREFIX_LEN: usize = 1 + 1 + 5;
+    const PNIL_LEN: usize = 1 + 4;
+    let mut out = Vec::with_capacity(
+        PNIL_LEN
+            + items
+                .iter()
+                .map(|item| PCONS_PREFIX_LEN + item.len())
+                .sum::<usize>(),
+    );
+    for item in items {
+        out.push(item_byte(Tag::Arity(3)));
+        out.push(item_byte(Tag::SymbolSize(5)));
+        out.extend_from_slice(b"pcons");
+        out.extend_from_slice(item);
     }
+    out.push(item_byte(Tag::SymbolSize(4)));
+    out.extend_from_slice(b"pnil");
     out
 }
 
 fn evidence_union(left: &[u8], right: &[u8]) -> Vec<u8> {
-    let mut set = evidence_set(left);
-    set.extend(evidence_set(right));
-    evidence_list(&set)
+    let mut count = 0;
+    visit_evidence(left, &mut |_| {
+        count += 1;
+        true
+    });
+    visit_evidence(right, &mut |_| {
+        count += 1;
+        true
+    });
+    let mut items = Vec::with_capacity(count);
+    visit_evidence(left, &mut |item| {
+        items.push(item);
+        true
+    });
+    if !items.is_sorted() {
+        items.sort_unstable();
+    }
+    items.dedup();
+    visit_evidence(right, &mut |item| {
+        if let Err(index) = items.binary_search(&item) {
+            items.insert(index, item);
+        }
+        true
+    });
+    evidence_list(&items)
 }
 
 fn is_expr_head(bytes: &[u8], name: &str) -> bool {
-    if let Tag::Arity(_) = byte_item(bytes[0]) {
-        let args = expr_args(bytes);
-        !args.is_empty() && is_symbol(args[0], name)
-    } else {
-        false
-    }
+    matches!(byte_item(bytes[0]), Tag::Arity(_))
+        && expr_args_iter(bytes)
+            .next()
+            .is_some_and(|head| is_symbol(head, name))
 }
 
 fn evidence_dependent(left: &[u8], right: &[u8]) -> bool {
-    let left = evidence_set(left);
-    evidence_set(right)
-        .iter()
-        .any(|item| left.contains(item) && is_expr_head(item, "rule-ev"))
+    let mut dependent = false;
+    visit_evidence(right, &mut |right_item| {
+        if !is_expr_head(right_item, "rule-ev") {
+            return true;
+        }
+        visit_evidence(left, &mut |left_item| {
+            if left_item == right_item {
+                dependent = true;
+                false
+            } else {
+                true
+            }
+        });
+        !dependent
+    });
+    dependent
 }
 
 fn evidence_overlaps(left: &[u8], right: &[u8]) -> bool {
-    let left = evidence_set(left);
-    evidence_set(right).iter().any(|item| left.contains(item))
+    let mut overlaps = false;
+    visit_evidence(right, &mut |right_item| {
+        visit_evidence(left, &mut |left_item| {
+            if left_item == right_item {
+                overlaps = true;
+                false
+            } else {
+                true
+            }
+        });
+        !overlaps
+    });
+    overlaps
 }
 
 fn inheritance_rule_source(rule: &[u8]) -> Option<&[u8]> {
-    if !matches!(byte_item(rule[0]), Tag::Arity(_)) {
-        return None;
-    }
-    let args = expr_args(rule);
-    let head = if args.len() == 2 && matches!(byte_item(args[0][0]), Tag::Arity(_)) {
-        args[0]
+    let [first, _second] = expr_args_exact::<2>(rule)?;
+    let head = if matches!(byte_item(first[0]), Tag::Arity(_)) {
+        first
     } else {
         rule
     };
-    let head_args = expr_args(head);
-    (head_args.len() == 2 && is_symbol(head_args[0], "inheritance-implication"))
-        .then_some(head_args[1])
+    let [name, source] = expr_args_exact::<2>(head)?;
+    is_symbol(name, "inheritance-implication").then_some(source)
 }
 
 fn evidence_uses_inheritance_source(evidence: &[u8], proof: &[u8]) -> bool {
-    evidence_set(evidence).iter().any(|item| {
+    let mut uses_source = false;
+    visit_evidence(evidence, &mut |item| {
         if !matches!(byte_item(item[0]), Tag::Arity(_)) {
+            return true;
+        }
+        if let Some([name, rule]) = expr_args_exact::<2>(item)
+            && is_symbol(name, "rule-ev")
+            && inheritance_rule_source(rule).is_some_and(|source| alpha_equiv(source, proof))
+        {
+            uses_source = true;
             return false;
         }
-        let args = expr_args(item);
-        args.len() == 2
-            && is_symbol(args[0], "rule-ev")
-            && inheritance_rule_source(args[1]).is_some_and(|source| alpha_equiv(source, proof))
-    })
+        true
+    });
+    uses_source
 }
 
 fn evidence_equal(left: &[u8], right: &[u8]) -> bool {
-    evidence_set(left) == evidence_set(right)
+    let subset = |source: &[u8], target: &[u8]| {
+        let mut all_present = true;
+        visit_evidence(source, &mut |source_item| {
+            let mut present = false;
+            visit_evidence(target, &mut |target_item| {
+                if source_item == target_item {
+                    present = true;
+                    false
+                } else {
+                    true
+                }
+            });
+            if !present {
+                all_present = false;
+            }
+            present
+        });
+        all_present
+    };
+    subset(left, right) && subset(right, left)
 }
 
 fn evidence_alpha_equal(left: &[u8], right: &[u8]) -> bool {
-    let left = evidence_set(left);
-    let right = evidence_set(right);
-    left.len() == right.len()
-        && left
-            .iter()
-            .all(|item| right.iter().any(|candidate| alpha_equiv(item, candidate)))
+    let mut left_items = InlineVec::<&[u8], 8>::new();
+    let mut right_items = InlineVec::<&[u8], 8>::new();
+    visit_evidence(left, &mut |item| {
+        if !left_items.contains(&item) {
+            left_items.push(item);
+        }
+        true
+    });
+    visit_evidence(right, &mut |item| {
+        if !right_items.contains(&item) {
+            right_items.push(item);
+        }
+        true
+    });
+    left_items.len() == right_items.len()
+        && left_items.iter().all(|item| {
+            right_items
+                .iter()
+                .any(|candidate| alpha_equiv(item, candidate))
+        })
 }
 
 fn inversion_proof_parts(proof_id: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
-    if !matches!(byte_item(proof_id[0]), Tag::Arity(_)) {
-        return None;
+    let [name, goal, rule, evidence] = expr_args_exact::<4>(proof_id)?;
+    if is_symbol(name, "scheduledInvN") {
+        return Some((goal, rule, evidence));
     }
-    let args = expr_args(proof_id);
-    if args.len() != 4 {
-        return None;
-    }
-    if is_symbol(args[0], "scheduledInvN") {
-        return Some((args[1], args[2], args[3]));
-    }
-    if is_symbol(args[0], "scheduledN") {
-        let rule = expr_args(args[2]);
-        if rule.len() == 3 && is_symbol(rule[0], "inv") {
-            return Some((args[1], rule[1], args[3]));
+    if is_symbol(name, "scheduledN") {
+        if let Some([kind, inverse, _]) = expr_args_exact::<3>(rule)
+            && is_symbol(kind, "inv")
+        {
+            return Some((goal, inverse, evidence));
         }
     }
     None
@@ -1144,26 +1378,34 @@ fn is_generated_inheritance_view_proof(proof_id: &[u8]) -> bool {
     if !matches!(byte_item(proof_id[0]), Tag::Arity(_)) {
         return false;
     }
-    let args = expr_args(proof_id);
-    if args.is_empty() {
+    let mut args = expr_args_iter(proof_id);
+    let Some(name) = args.next() else {
         return false;
-    }
-    if is_symbol(args[0], "scheduledInvN") {
+    };
+    if is_symbol(name, "scheduledInvN") {
         return true;
     }
-    is_symbol(args[0], "scheduledN")
-        && args.len() >= 3
-        && (is_expr_head(args[2], "stv-prior") || is_expr_head(args[2], "inv"))
+    if !is_symbol(name, "scheduledN") {
+        return false;
+    }
+    let Some(rule) = args.nth(1) else {
+        return false;
+    };
+    is_expr_head(rule, "stv-prior") || is_expr_head(rule, "inv")
 }
 
 fn is_inheritance_refutation_proof(proof_id: &[u8]) -> bool {
     if !matches!(byte_item(proof_id[0]), Tag::Arity(_)) {
         return false;
     }
-    let args = expr_args(proof_id);
-    args.len() >= 3
-        && is_symbol(args[0], "scheduledN")
-        && is_expr_head(args[2], "mp-conclusion-not")
+    let mut args = expr_args_iter(proof_id);
+    let Some(name) = args.next() else {
+        return false;
+    };
+    is_symbol(name, "scheduledN")
+        && args
+            .nth(1)
+            .is_some_and(|rule| is_expr_head(rule, "mp-conclusion-not"))
 }
 
 fn proof_identity_equal(left: &ProofRow, right: &ProofRow) -> bool {
@@ -1220,29 +1462,37 @@ fn select_current_snapshot_proof_refs(rows: &BTreeSet<ProofRow>) -> Vec<&ProofRo
     selected
 }
 
-#[derive(Clone)]
-struct ProjectionEvidence {
-    source: Vec<u8>,
-    target: Vec<u8>,
+struct ProjectionEvidence<'a> {
+    encoded: &'a [u8],
+    source: &'a [u8],
+    target: &'a [u8],
     marginal: bool,
 }
 
-fn projection_evidence(ev: &[u8]) -> Vec<ProjectionEvidence> {
-    evidence_set(ev)
-        .into_iter()
-        .filter_map(|item| {
-            let args = expr_args(&item);
-            if args.len() != 5 || !is_symbol(args[0], "projection-ev") {
-                return None;
-            }
-            let proj_args = expr_args(args[1]);
-            Some(ProjectionEvidence {
-                source: args[2].to_vec(),
-                target: args[4].to_vec(),
-                marginal: proj_args.len() >= 3 && is_symbol(proj_args[0], "marginal-proj"),
-            })
-        })
-        .collect()
+fn projection_evidence(ev: &[u8]) -> Vec<ProjectionEvidence<'_>> {
+    let mut projections = Vec::new();
+    visit_evidence(ev, &mut |item| {
+        let Some([name, projection, source, _proof, target]) = expr_args_exact::<5>(item) else {
+            return true;
+        };
+        if !is_symbol(name, "projection-ev") {
+            return true;
+        }
+        let marginal = matches!(byte_item(projection[0]), Tag::Arity(arity) if arity >= 3)
+            && expr_args_iter(projection)
+                .next()
+                .is_some_and(|kind| is_symbol(kind, "marginal-proj"));
+        projections.push(ProjectionEvidence {
+            encoded: item,
+            source,
+            target,
+            marginal,
+        });
+        true
+    });
+    projections.sort_unstable_by(|left, right| left.encoded.cmp(right.encoded));
+    projections.dedup_by(|left, right| left.encoded == right.encoded);
+    projections
 }
 
 fn related_projection_choice(
@@ -1305,9 +1555,8 @@ fn collect_pcons(bytes: &[u8], out: &mut Vec<Vec<u8>>) -> bool {
     if is_symbol(bytes, "pnil") {
         return true;
     }
-    if let Tag::Arity(_) = byte_item(bytes[0]) {
-        let args = expr_args(bytes);
-        if args.len() == 3 && is_symbol(args[0], "pcons") {
+    if let Some(args) = expr_args_exact::<3>(bytes) {
+        if is_symbol(args[0], "pcons") {
             out.push(args[1].to_vec());
             return collect_pcons(args[2], out);
         }
@@ -1320,15 +1569,15 @@ fn parse_scheduled_ctv_proof(row: &ProofRow) -> Option<ScheduledCtvProof> {
     if !matches!(byte_item(proof_id[0]), Tag::Arity(_)) {
         return None;
     }
-    let proof_args = expr_args(proof_id);
-    if proof_args.len() != 4 || !is_symbol(proof_args[0], "scheduledN") {
+    let proof_args = expr_args_exact::<4>(proof_id)?;
+    if !is_symbol(proof_args[0], "scheduledN") {
         return None;
     }
     if !matches!(byte_item(proof_args[2][0]), Tag::Arity(_)) {
         return None;
     }
-    let rule_args = expr_args(proof_args[2]);
-    if rule_args.len() != 3 || !is_symbol(rule_args[0], "ctv") {
+    let rule_args = expr_args_exact::<3>(proof_args[2])?;
+    if !is_symbol(rule_args[0], "ctv") {
         return None;
     }
 
@@ -1350,14 +1599,14 @@ fn fact_evidence_key(item: &[u8]) -> Option<Vec<u8>> {
     if !matches!(byte_item(item[0]), Tag::Arity(_)) {
         return None;
     }
-    let args = expr_args(item);
-    if args.len() != 3 || !is_symbol(args[0], "fact-ev") {
+    let args = expr_args_exact::<3>(item)?;
+    if !is_symbol(args[0], "fact-ev") {
         None
     } else if matches!(byte_item(args[1][0]), Tag::Arity(_)) {
-        let source = expr_args(args[1]);
+        let source = expr_args_exact::<2>(args[1])?;
         // Only fact-key evidence expands through proved rows.  A proof-id
         // source names exact provenance and must remain an atomic item.
-        if source.len() == 2 && is_symbol(source[0], "fact-key") && source[1] == args[2] {
+        if is_symbol(source[0], "fact-key") && source[1] == args[2] {
             Some(args[2].to_vec())
         } else {
             None
@@ -1562,9 +1811,7 @@ fn union_proof_evidence(proofs: &[ScheduledCtvProof]) -> Vec<u8> {
     })
 }
 
-fn factor_merge_all_shared_proofs(
-    rows: &[&ProofRow],
-) -> Option<(Vec<u8>, Vec<u8>)> {
+fn factor_merge_all_shared_proofs(rows: &[&ProofRow]) -> Option<(Vec<u8>, Vec<u8>)> {
     if rows.len() < 2 {
         return None;
     }
@@ -1627,7 +1874,7 @@ fn packed_stv(bytes: &[u8]) -> Option<Vec<u8>> {
     if !matches!(byte_item(bytes[0]), Tag::Arity(2)) {
         return None;
     }
-    let args = expr_args(bytes);
+    let args = expr_args_exact::<2>(bytes)?;
     if args.iter().all(|arg| try_f64_symbol(arg).is_some()) {
         Some(bytes.to_vec())
     } else {
@@ -1639,8 +1886,8 @@ fn fact_row(path: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     if !matches!(byte_item(path[0]), Tag::Arity(_)) {
         return None;
     }
-    let args = expr_args(path);
-    if args.len() == 3 && is_symbol(args[0], "fact") {
+    let args = expr_args_exact::<3>(path)?;
+    if is_symbol(args[0], "fact") {
         Some((args[1].to_vec(), packed_stv(args[2])?))
     } else {
         None
@@ -1651,8 +1898,8 @@ fn proved_row(path: &[u8]) -> Option<(Vec<u8>, ProofRow)> {
     if !matches!(byte_item(path[0]), Tag::Arity(_)) {
         return None;
     }
-    let args = expr_args(path);
-    if args.len() == 5 && is_symbol(args[0], "proved") {
+    let args = expr_args_exact::<5>(path)?;
+    if is_symbol(args[0], "proved") {
         Some((
             args[1].to_vec(),
             (args[2].to_vec(), args[3].to_vec(), args[4].to_vec()),
@@ -1721,14 +1968,10 @@ where
     proved
 }
 
-type SimpleProofEvidence = BTreeMap<
-    Vec<u8>,
-    BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, BTreeSet<Vec<u8>>>>,
->;
+type SimpleProofEvidence =
+    BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, BTreeSet<Vec<u8>>>>>;
 
-fn collect_simple_proof_evidence<Z>(
-    root: &Z,
-) -> SimpleProofEvidence
+fn collect_simple_proof_evidence<Z>(root: &Z) -> SimpleProofEvidence
 where
     Z: ZipperForking<()>,
 {
@@ -1743,8 +1986,10 @@ where
         if !matches!(byte_item(path[0]), Tag::Arity(_)) {
             continue;
         }
-        let args = expr_args(path);
-        if args.len() == 5 && is_symbol(args[0], "proof-evidence") {
+        let Some(args) = expr_args_exact::<5>(path) else {
+            continue;
+        };
+        if is_symbol(args[0], "proof-evidence") {
             evidence
                 .entry(args[1].to_vec())
                 .or_default()
@@ -2001,8 +2246,7 @@ fn parse_contribution_observation(bytes: &[u8]) -> Option<ContributionObservatio
     if is_symbol(bytes, "no-observation") {
         return None;
     }
-    let args = expr_args(bytes);
-    assert_eq!(args.len(), 4, "observation expects value, weight, and proof");
+    let args = expr_args_exact::<4>(bytes).expect("observation expects value, weight, and proof");
     assert_eq!(symbol_str(args[0]), "observation");
     Some(ContributionObservation {
         value: args[1].to_vec(),
@@ -2011,45 +2255,69 @@ fn parse_contribution_observation(bytes: &[u8]) -> Option<ContributionObservatio
     })
 }
 
-fn append_expr_arg(expr: &[u8], arg: &[u8]) -> Vec<u8> {
-    let mut args = expr_args(expr);
-    args.push(arg);
-    let mut out = Vec::new();
-    push_raw_expr(&mut out, &args);
-    out
+fn append_expr_arg(out: &mut Vec<u8>, expr: &[u8], arg: &[u8]) {
+    let Tag::Arity(arity) = byte_item(expr[0]) else {
+        panic!("expected expression, got {}", serialize(expr));
+    };
+    out.clear();
+    out.reserve(expr.len() + arg.len());
+    out.push(item_byte(Tag::Arity(arity + 1)));
+    out.extend_from_slice(&expr[1..]);
+    out.extend_from_slice(arg);
 }
 
-fn contribution_observation_atom(target: &[u8], identity: &[u8], observation: &ContributionObservation) -> Vec<u8> {
-    let mut out = Vec::new();
-    push_expr(&mut out, "contribution-observation", &[
-        target, identity, &observation.value, &observation.weight, &observation.proof,
-    ]);
-    out
+fn contribution_observation_atom(
+    out: &mut Vec<u8>,
+    target: &[u8],
+    identity: &[u8],
+    observation: &ContributionObservation,
+) {
+    out.clear();
+    push_expr(
+        out,
+        "contribution-observation",
+        &[
+            target,
+            identity,
+            &observation.value,
+            &observation.weight,
+            &observation.proof,
+        ],
+    );
 }
 
-fn contribution_state_atom(target: &[u8], state: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    push_expr(&mut out, "contribution-state", &[target, state]);
-    out
+fn contribution_state_atom(out: &mut Vec<u8>, target: &[u8], state: &[u8]) {
+    out.clear();
+    push_expr(out, "contribution-state", &[target, state]);
 }
 
-fn contribution_value_atom(target: &[u8], stv: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    push_expr(&mut out, "contribution-value", &[target, stv]);
-    out
+fn contribution_value_atom(out: &mut Vec<u8>, target: &[u8], stv: &[u8]) {
+    out.clear();
+    push_expr(out, "contribution-value", &[target, stv]);
 }
 
 impl Sink for ContributionSink {
     fn new(_e: Expr) -> Self {
-        ContributionSink { groups: BTreeMap::new() }
+        ContributionSink {
+            groups: BTreeMap::new(),
+        }
     }
     fn request(&self) -> impl Iterator<Item = WriteResourceRequest> {
         std::iter::once(WriteResourceRequest::BTM([].as_slice()))
     }
-    fn sink<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(&mut self, mut it: It, path: &[u8]) where 'a: 'w, 'k: 'w {
-        let WriteResource::BTM(wz) = it.next().unwrap() else { unreachable!() };
-        let args = expr_args(&path[wz.root_prefix_path().len()..]);
-        assert_eq!(args.len(), 8, "update-contribution expects seven arguments");
+    fn sink<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+        path: &[u8],
+    ) where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
+        let args = expr_args_exact::<8>(&path[wz.root_prefix_path().len()..])
+            .expect("update-contribution expects seven arguments");
         assert_eq!(symbol_str(args[0]), "update-contribution");
 
         let target = args[1].to_vec();
@@ -2057,27 +2325,56 @@ impl Sink for ContributionSink {
         let old = parse_contribution_observation(args[3]);
         let new = parse_contribution_observation(args[4]);
         let old_state = args[5].to_vec();
-        let old_stv = if is_symbol(args[6], "no-evidence") { None } else { Some(args[6].to_vec()) };
-        let current_stv = if is_symbol(args[7], "no-evidence") { None } else { Some(args[7].to_vec()) };
-        let group = self.groups.entry(target.clone()).or_insert_with(|| ContributionGroup {
-            target,
-            old_state: old_state.clone(),
-            old_stv: old_stv.clone(),
-            current_stvs: BTreeSet::new(),
-            updates: BTreeMap::new(),
-        });
-        assert_eq!(group.old_state, old_state, "inconsistent contribution state");
-        assert_eq!(group.old_stv, old_stv, "inconsistent contribution target value");
+        let old_stv = if is_symbol(args[6], "no-evidence") {
+            None
+        } else {
+            Some(args[6].to_vec())
+        };
+        let current_stv = if is_symbol(args[7], "no-evidence") {
+            None
+        } else {
+            Some(args[7].to_vec())
+        };
+        let group = self
+            .groups
+            .entry(target.clone())
+            .or_insert_with(|| ContributionGroup {
+                target,
+                old_state: old_state.clone(),
+                old_stv: old_stv.clone(),
+                current_stvs: BTreeSet::new(),
+                updates: BTreeMap::new(),
+            });
+        assert_eq!(
+            group.old_state, old_state,
+            "inconsistent contribution state"
+        );
+        assert_eq!(
+            group.old_stv, old_stv,
+            "inconsistent contribution target value"
+        );
         if let Some(current_stv) = current_stv {
             group.current_stvs.insert(current_stv);
         }
-        group.updates.insert(identity.clone(), ContributionUpdate { identity, old, new });
+        group
+            .updates
+            .insert(identity.clone(), ContributionUpdate { identity, old, new });
     }
-    fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(&mut self, mut it: It) -> bool where 'a: 'w, 'k: 'w {
-        let WriteResource::BTM(wz) = it.next().unwrap() else { unreachable!() };
+    fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
+        &mut self,
+        mut it: It,
+    ) -> bool
+    where
+        'a: 'w,
+        'k: 'w,
+    {
+        let WriteResource::BTM(wz) = it.next().unwrap() else {
+            unreachable!()
+        };
         wz.reset();
         let mut remove = PathMap::new();
         let mut add = PathMap::new();
+        let mut atom = Vec::new();
 
         for group in self.groups.values() {
             let (mut weighted_sum, mut mass_sum) = stv_parts(&group.old_state);
@@ -2091,7 +2388,8 @@ impl Sink for ContributionSink {
                     weighted_sum -= value * weight;
                     mass_sum -= weight;
                     removed_mass += weight;
-                    remove.insert(&contribution_observation_atom(&group.target, &update.identity, old), ());
+                    contribution_observation_atom(&mut atom, &group.target, &update.identity, old);
+                    remove.insert(&atom, ());
                 }
                 if let Some(new) = &update.new {
                     let value = stv_f64(&new.value, "contribution value");
@@ -2099,32 +2397,49 @@ impl Sink for ContributionSink {
                     weighted_sum += value * weight;
                     mass_sum += weight;
                     new_values.push(value);
-                    add.insert(&contribution_observation_atom(&group.target, &update.identity, new), ());
+                    contribution_observation_atom(&mut atom, &group.target, &update.identity, new);
+                    add.insert(&atom, ());
                 }
             }
-            if weighted_sum.abs() < f64::EPSILON { weighted_sum = 0.0; }
-            if mass_sum.abs() < f64::EPSILON { mass_sum = 0.0; }
-            assert!(mass_sum >= 0.0, "contribution mass must not become negative");
+            if weighted_sum.abs() < f64::EPSILON {
+                weighted_sum = 0.0;
+            }
+            if mass_sum.abs() < f64::EPSILON {
+                mass_sum = 0.0;
+            }
+            assert!(
+                mass_sum >= 0.0,
+                "contribution mass must not become negative"
+            );
 
-            remove.insert(&contribution_state_atom(&group.target, &group.old_state), ());
+            contribution_state_atom(&mut atom, &group.target, &group.old_state);
+            remove.insert(&atom, ());
             let new_state = stv_bytes(weighted_sum, mass_sum);
-            add.insert(&contribution_state_atom(&group.target, &new_state), ());
+            contribution_state_atom(&mut atom, &group.target, &new_state);
+            add.insert(&atom, ());
             if let Some(old_stv) = &group.old_stv {
-                remove.insert(&append_expr_arg(&group.target, old_stv), ());
-                remove.insert(&contribution_value_atom(&group.target, old_stv), ());
+                append_expr_arg(&mut atom, &group.target, old_stv);
+                remove.insert(&atom, ());
+                contribution_value_atom(&mut atom, &group.target, old_stv);
+                remove.insert(&atom, ());
             }
             for current_stv in &group.current_stvs {
-                remove.insert(&append_expr_arg(&group.target, current_stv), ());
+                append_expr_arg(&mut atom, &group.target, current_stv);
+                remove.insert(&atom, ());
             }
             if mass_sum > 0.0 {
-                let strength = if (initial_mass - removed_mass).abs() < f64::EPSILON && new_values.len() == 1 {
+                let strength = if (initial_mass - removed_mass).abs() < f64::EPSILON
+                    && new_values.len() == 1
+                {
                     new_values[0]
                 } else {
                     weighted_sum / mass_sum
                 };
                 let new_stv = stv_bytes(strength, mass_sum / (mass_sum + 800.0));
-                add.insert(&append_expr_arg(&group.target, &new_stv), ());
-                add.insert(&contribution_value_atom(&group.target, &new_stv), ());
+                append_expr_arg(&mut atom, &group.target, &new_stv);
+                add.insert(&atom, ());
+                contribution_value_atom(&mut atom, &group.target, &new_stv);
+                add.insert(&atom, ());
             }
         }
 
@@ -2165,16 +2480,21 @@ impl Sink for BaseRateSink {
             unreachable!()
         };
         let mpath = &path[wz.root_prefix_path().len()..];
-        let args = expr_args(mpath);
+        let (args, args_len) =
+            expr_args_bounded::<5>(mpath).expect("fold-base-rate expects an expression");
         assert!(
-            args.len() == 4 || args.len() == 5,
+            args_len == 4 || args_len == 5,
             "fold-base-rate expects 3 or 4 payload args"
         );
         assert_eq!(symbol_str(args[0]), "fold-base-rate");
-        if args.len() == 5 {
-            let metadata = expr_args(args[4]);
+        if args_len == 5 {
+            let (metadata, metadata_len) =
+                expr_args_bounded::<5>(args[4]).expect("base-rate metadata expects an expression");
             if symbol_str(metadata[0]) == "base-rate-contribution-value" {
-                assert_eq!(metadata.len(), 2, "base-rate-contribution-value expects one argument");
+                assert_eq!(
+                    metadata_len, 2,
+                    "base-rate-contribution-value expects one argument"
+                );
                 let entry = self.groups.entry(args[1].to_vec()).or_default();
                 entry
                     .fact_stvs_by_old
@@ -2188,7 +2508,7 @@ impl Sink for BaseRateSink {
                     .insert(metadata[1].to_vec());
                 return;
             }
-            assert_eq!(metadata.len(), 5, "base-rate-guard expects four arguments");
+            assert_eq!(metadata_len, 5, "base-rate-guard expects four arguments");
             assert_eq!(symbol_str(metadata[0]), "base-rate-guard");
             let guard_kind = symbol_str(metadata[1]);
             assert!(
@@ -2235,6 +2555,8 @@ impl Sink for BaseRateSink {
         wz.reset();
         let mut remove = PathMap::new();
         let mut add = PathMap::new();
+        let mut atom = Vec::new();
+        let mut target = Vec::new();
 
         for (pattern, group) in &self.groups {
             // Several rounds can leave fold rows based on different snapshots.
@@ -2253,7 +2575,11 @@ impl Sink for BaseRateSink {
             let Some(old) = best_old else {
                 continue;
             };
-            let fact_stvs = group.fact_stvs_by_old.get(old).cloned().unwrap_or_default();
+            let fact_stvs = group
+                .fact_stvs_by_old
+                .get(old)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             let guarded = group
                 .guarded_proofs_by_old
                 .get(old)
@@ -2262,7 +2588,8 @@ impl Sink for BaseRateSink {
             let mut wsum = 0.0;
             let mut csum = 0.0;
             for (s, c) in fact_stvs
-                .into_iter()
+                .iter()
+                .copied()
                 .chain(guarded.iter().map(|row| stv_parts(&row.0)))
             {
                 wsum += s * c;
@@ -2281,19 +2608,21 @@ impl Sink for BaseRateSink {
             if new_c < old_c {
                 continue;
             }
-            let mut old_fact = Vec::new();
-            push_expr(&mut old_fact, "base-rate", &[pattern, old]);
-            remove.insert(&old_fact[..], ());
-            let mut new_fact = Vec::new();
-            push_expr(&mut new_fact, "base-rate", &[pattern, &new[..]]);
-            add.insert(&new_fact[..], ());
+            atom.clear();
+            push_expr(&mut atom, "base-rate", &[pattern, old]);
+            remove.insert(&atom, ());
+            atom.clear();
+            push_expr(&mut atom, "base-rate", &[pattern, &new]);
+            add.insert(&atom, ());
             if let Some(stored_stvs) = group.contribution_stvs_by_old.get(old) {
-                let mut target = Vec::new();
+                target.clear();
                 push_expr(&mut target, "base-rate", &[pattern]);
                 for stored_stv in stored_stvs {
-                    remove.insert(&contribution_value_atom(&target, stored_stv), ());
+                    contribution_value_atom(&mut atom, &target, stored_stv);
+                    remove.insert(&atom, ());
                 }
-                add.insert(&contribution_value_atom(&target, &new), ());
+                contribution_value_atom(&mut atom, &target, &new);
+                add.insert(&atom, ());
             }
         }
 
@@ -2347,20 +2676,20 @@ fn inheritance_subject(goal: &[u8]) -> Option<&[u8]> {
     if !matches!(byte_item(goal[0]), Tag::Arity(_)) {
         return None;
     }
-    let scoped = expr_args(goal);
-    if scoped.len() != 2 || !matches!(byte_item(scoped[1][0]), Tag::Arity(_)) {
+    let scoped = expr_args_exact::<2>(goal)?;
+    if !matches!(byte_item(scoped[1][0]), Tag::Arity(_)) {
         return None;
     }
-    let inheritance = expr_args(scoped[1]);
-    (inheritance.len() == 3 && is_symbol(inheritance[0], "Inheritance")).then_some(inheritance[1])
+    let inheritance = expr_args_exact::<3>(scoped[1])?;
+    is_symbol(inheritance[0], "Inheritance").then_some(inheritance[1])
 }
 
 fn prior_candidate_goal<'a>(wrapped: &'a [u8], proof: &[u8]) -> Option<(&'a [u8], bool)> {
     if is_symbol(proof, "no-prior-proof") {
         return None;
     }
-    let args = expr_args(wrapped);
-    (args.len() == 4 && is_symbol(args[0], "prior-candidate"))
+    let args = expr_args_exact::<4>(wrapped)?;
+    is_symbol(args[0], "prior-candidate")
         .then_some((args[2], is_symbol(args[3], "forward-observed")))
 }
 
@@ -2368,18 +2697,20 @@ fn prior_candidate_allowed(proof: &[u8]) -> bool {
     if !matches!(byte_item(proof[0]), Tag::Arity(_)) {
         return true;
     }
-    let args = expr_args(proof);
-    if args.is_empty() {
+    let mut args = expr_args_iter(proof);
+    let Some(head) = args.next() else {
         return true;
-    }
-    if is_symbol(args[0], "scheduledN") && args.len() >= 3 {
+    };
+    if is_symbol(head, "scheduledN") && args.len() >= 2 {
+        let _goal = args.next();
+        let rule = args.next().expect("scheduledN rule");
         // PeTTa's one-pass forward marginal observes asserted inheritance
         // links and explicit refutations.  Positive derived links are rule
         // consequences, not new population observations; admitting them here
         // recreates the obsolete warm-up/two-pass base-rate feedback.
-        return is_expr_head(args[2], "mp-conclusion-not");
+        return is_expr_head(rule, "mp-conclusion-not");
     }
-    !is_symbol(args[0], "scheduledInvN")
+    !is_symbol(head, "scheduledInvN")
 }
 
 fn merge_current_goal_rows(rows: &BTreeSet<ProofRow>) -> Option<Vec<u8>> {
@@ -2477,13 +2808,14 @@ impl Sink for PriorRuleStvSink {
         let WriteResource::BTM(wz) = it.next().unwrap() else {
             unreachable!()
         };
-        let args = expr_args(&path[wz.root_prefix_path().len()..]);
+        let (args, args_len) = expr_args_bounded::<22>(&path[wz.root_prefix_path().len()..])
+            .expect("prior-rule-stv expects an expression");
         assert!(
-            args.len() == 21 || args.len() == 22,
+            args_len == 21 || args_len == 22,
             "prior-rule-stv expects 20 or 21 payload args"
         );
         assert_eq!(symbol_str(args[0]), "prior-rule-stv");
-        let has_premise_evidence = args.len() == 22;
+        let has_premise_evidence = args_len == 22;
         let candidate_offset = usize::from(has_premise_evidence);
 
         let key = PriorRuleKey {
@@ -2597,21 +2929,22 @@ impl Sink for PriorRuleStvSink {
         };
         wz.reset();
         let mut add = PathMap::new();
+        let mut atom = Vec::new();
 
         for (key, group) in &self.groups {
             let signature = prior_proof_signature(group);
-            let mut snapshot = Vec::new();
+            atom.clear();
             push_expr(
-                &mut snapshot,
+                &mut atom,
                 "prior-stv-snapshot",
                 &[&key.goal, &key.premise_stv, &key.proof_id, &signature],
             );
             wz.reset();
-            wz.move_to_path(&snapshot[wz.root_prefix_path().len()..]);
+            wz.move_to_path(&atom[wz.root_prefix_path().len()..]);
             if wz.path_exists() {
                 continue;
             }
-            add.insert(&snapshot, ());
+            add.insert(&atom, ());
 
             let divisor = stv_f64(&key.divisor, "divisor").max(f64::EPSILON);
             let antecedent = prior_weighted_base_rate(
@@ -2639,13 +2972,13 @@ impl Sink for PriorRuleStvSink {
             let proof_stv = OrStvSink::mp_stv(&key.premise_stv, &key.rule_stv, &negative);
 
             let merged_evset = evidence_union(&key.evset, &key.premise_evset);
-            let mut open_proof = Vec::new();
+            atom.clear();
             push_expr(
-                &mut open_proof,
+                &mut atom,
                 "open-proof",
                 &[&key.goal, &proof_stv, &key.proof_id, &merged_evset],
             );
-            add.insert(&open_proof, ());
+            add.insert(&atom, ());
         }
 
         // Keep the grounded application active.  Its FoldAll marginals are
@@ -2665,26 +2998,22 @@ pub struct PairCountsSink {
 
 impl PairCountsSink {
     fn pair_counts_from_values(values: &BTreeMap<Vec<u8>, u64>) -> Vec<u8> {
-        let mut pairs = Vec::new();
         let one = symbol_bytes("1.0");
         let mut pairs_by_value: Vec<_> = values.iter().collect();
         pairs_by_value.sort_by(|(a, _), (b, _)| serialize(a).cmp(&serialize(b)));
 
-        for (value, count) in pairs_by_value {
-            let mass = if *count == 1 {
-                one.clone()
-            } else {
-                symbol_bytes(&format!("{count}.0"))
-            };
-            let mut pair = Vec::new();
-            push_raw_expr(&mut pair, &[value, &mass]);
-            pairs.push(pair);
-        }
-
         let mut pair_list = Vec::new();
-        pair_list.push(item_byte(Tag::Arity(pairs.len() as u8)));
-        for pair in &pairs {
-            pair_list.extend_from_slice(pair);
+        pair_list.push(item_byte(Tag::Arity(pairs_by_value.len() as u8)));
+        for (value, count) in pairs_by_value {
+            pair_list.push(item_byte(Tag::Arity(2)));
+            pair_list.extend_from_slice(value);
+            if *count == 1 {
+                pair_list.extend_from_slice(&one);
+            } else {
+                let mass = format!("{count}.0");
+                pair_list.push(item_byte(Tag::SymbolSize(mass.len() as u8)));
+                pair_list.extend_from_slice(mass.as_bytes());
+            }
         }
 
         let mut out = Vec::new();
@@ -2714,8 +3043,7 @@ impl Sink for PairCountsSink {
             unreachable!()
         };
         let mpath = &path[wz.root_prefix_path().len()..];
-        let args = expr_args(mpath);
-        assert_eq!(args.len(), 4, "pair-counts expects 3 payload args");
+        let args = expr_args_exact::<4>(mpath).expect("pair-counts expects 3 payload args");
         assert_eq!(symbol_str(args[0]), "pair-counts");
         self.unique.insert(mpath, ());
     }
@@ -2737,7 +3065,8 @@ impl Sink for PairCountsSink {
         let mut output_vars: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
 
         for (path, ()) in self.unique.iter() {
-            let args = expr_args(&path);
+            let args =
+                expr_args_exact::<4>(&path).expect("stored pair-counts row must remain valid");
             let output = args[1].to_vec();
             let output_var = args[2].to_vec();
             let value = args[3].to_vec();
@@ -2803,6 +3132,7 @@ fn write_dist_convolution(
     average: bool,
 ) -> PathMap<()> {
     let mut add = PathMap::new();
+    let mut atom = Vec::new();
     for (result_pid, sources) in groups {
         if sources.is_empty() {
             continue;
@@ -2832,7 +3162,7 @@ fn write_dist_convolution(
             }
             let value_bytes = symbol_bytes(&value);
             let mass_bytes = symbol_bytes(&mass.to_string());
-            let mut atom = Vec::new();
+            atom.clear();
             push_expr(
                 &mut atom,
                 "dist-pair",
@@ -2865,8 +3195,7 @@ impl Sink for DistAverageSink {
             unreachable!()
         };
         let mpath = &path[wz.root_prefix_path().len()..];
-        let args = expr_args(mpath);
-        assert_eq!(args.len(), 5, "dist-average expects 4 payload args");
+        let args = expr_args_exact::<5>(mpath).expect("dist-average expects 4 payload args");
         assert_eq!(symbol_str(args[0]), "dist-average");
 
         let result_pid = args[1].to_vec();
@@ -2929,8 +3258,7 @@ impl Sink for DistSumSink {
             unreachable!()
         };
         let mpath = &path[wz.root_prefix_path().len()..];
-        let args = expr_args(mpath);
-        assert_eq!(args.len(), 5, "dist-sum expects 4 payload args");
+        let args = expr_args_exact::<5>(mpath).expect("dist-sum expects 4 payload args");
         assert_eq!(symbol_str(args[0]), "dist-sum");
 
         let result_pid = args[1].to_vec();
@@ -3037,9 +3365,12 @@ impl OrStvSink {
     }
 
     fn proof_id(rule_id: &[u8], proof_ids: &[Vec<u8>]) -> Vec<u8> {
-        let proof_refs: Vec<&[u8]> = proof_ids.iter().map(Vec::as_slice).collect();
         let mut disjunction = Vec::new();
-        push_expr(&mut disjunction, "disjunction", &proof_refs);
+        disjunction.push(item_byte(Tag::Arity((proof_ids.len() + 1) as u8)));
+        disjunction.extend_from_slice(&symbol_bytes("disjunction"));
+        for proof_id in proof_ids {
+            disjunction.extend_from_slice(proof_id);
+        }
 
         let mut proof = Vec::new();
         push_raw_expr(&mut proof, &[rule_id, &disjunction[..]]);
@@ -3068,8 +3399,7 @@ impl Sink for OrStvSink {
             unreachable!()
         };
         let mpath = &path[wz.root_prefix_path().len()..];
-        let args = expr_args(mpath);
-        assert_eq!(args.len(), 8, "or-stv expects 7 payload args");
+        let args = expr_args_exact::<8>(mpath).expect("or-stv expects 7 payload args");
         assert_eq!(symbol_str(args[0]), "or-stv");
         self.unique.insert(mpath, ());
     }
@@ -3088,7 +3418,7 @@ impl Sink for OrStvSink {
 
         let mut groups: BTreeMap<OrStvKey, Vec<OrStvRow>> = BTreeMap::new();
         for (path, ()) in self.unique.iter() {
-            let args = expr_args(&path);
+            let args = expr_args_exact::<8>(&path).expect("stored or-stv row must remain valid");
             let key = (
                 args[1].to_vec(),
                 args[2].to_vec(),
@@ -3104,6 +3434,7 @@ impl Sink for OrStvSink {
         self.unique = PathMap::new();
 
         let mut add = PathMap::new();
+        let mut open_proof = Vec::new();
         for ((goal, rule_id, pos, neg), mut rows) in groups {
             rows.sort_by(|(left_stv, left_proof, _), (right_stv, right_proof, _)| {
                 let (left_s, _) = stv_parts(left_stv);
@@ -3124,7 +3455,7 @@ impl Sink for OrStvSink {
             let proof_stv = OrStvSink::mp_stv(&acc, &pos, &neg);
             let proof_id = OrStvSink::proof_id(&rule_id, &proof_ids);
 
-            let mut open_proof = Vec::new();
+            open_proof.clear();
             push_expr(
                 &mut open_proof,
                 "open-proof",
@@ -3172,12 +3503,12 @@ impl TotalEvidenceMpSink {
     }
 
     fn proof_id(proof_id: &[u8], rows: &[TotalEvidenceMpRow]) -> Vec<u8> {
-        let proof_ids: Vec<&[u8]> = rows
-            .iter()
-            .map(|(_, _, proof, _)| proof.as_slice())
-            .collect();
         let mut foldall = Vec::new();
-        push_expr(&mut foldall, "foldall-proof", &proof_ids);
+        foldall.push(item_byte(Tag::Arity((rows.len() + 1) as u8)));
+        foldall.extend_from_slice(&symbol_bytes("foldall-proof"));
+        for (_, _, proof, _) in rows {
+            foldall.extend_from_slice(proof);
+        }
 
         let mut proof = Vec::new();
         push_expr(
@@ -3210,8 +3541,7 @@ impl Sink for TotalEvidenceMpSink {
             unreachable!()
         };
         let mpath = &path[wz.root_prefix_path().len()..];
-        let args = expr_args(mpath);
-        assert_eq!(args.len(), 11, "total-evidence-mp expects 11 payload args");
+        let args = expr_args_exact::<11>(mpath).expect("total-evidence-mp expects 10 payload args");
         assert_eq!(symbol_str(args[0]), "total-evidence-mp");
         self.unique.insert(mpath, ());
     }
@@ -3230,7 +3560,8 @@ impl Sink for TotalEvidenceMpSink {
 
         let mut groups: BTreeMap<TotalEvidenceMpKey, Vec<TotalEvidenceMpRow>> = BTreeMap::new();
         for (path, ()) in self.unique.iter() {
-            let args = expr_args(&path);
+            let args = expr_args_exact::<11>(&path)
+                .expect("stored total-evidence-mp row must remain valid");
             if args[4] == args[5] {
                 continue;
             }
@@ -3252,6 +3583,7 @@ impl Sink for TotalEvidenceMpSink {
         self.unique = PathMap::new();
 
         let mut add = PathMap::new();
+        let mut open_proof = Vec::new();
         for ((goal, proof_id, ante_stv, _p1, _p2, ante_evset), rows) in groups {
             let mut pos_rows = Vec::new();
             let mut neg_rows = Vec::new();
@@ -3274,7 +3606,7 @@ impl Sink for TotalEvidenceMpSink {
             proof_rows.extend(neg_rows);
             let proof = Self::proof_id(&proof_id, &proof_rows);
 
-            let mut open_proof = Vec::new();
+            open_proof.clear();
             push_expr(
                 &mut open_proof,
                 "open-proof",
@@ -3314,12 +3646,8 @@ impl Sink for SimpleReviseProofsSink {
             unreachable!()
         };
         let mpath = &path[wz.root_prefix_path().len()..];
-        let args = expr_args(mpath);
-        assert_eq!(
-            args.len(),
-            5,
-            "revise-proofs-simple expects TYPE, GOAL, PROOF-ID, and STV"
-        );
+        let args = expr_args_exact::<5>(mpath)
+            .expect("revise-proofs-simple expects TYPE, GOAL, PROOF-ID, and STV");
         assert_eq!(symbol_str(args[0]), "revise-proofs-simple");
         self.groups
             .entry((args[1].to_vec(), args[2].to_vec()))
@@ -3342,23 +3670,22 @@ impl Sink for SimpleReviseProofsSink {
         let evidence = collect_simple_proof_evidence(wz);
         let mut remove = PathMap::new();
         let mut add = PathMap::new();
+        let mut atom = Vec::new();
+        let mut merge_stv_scratch = Vec::new();
+        let mut merge_proof_scratch = Vec::new();
 
         for ((proof_type, goal), rows) in &self.groups {
             let mut merged: Option<(Vec<u8>, Vec<u8>)> = None;
             let mut merged_evidence = BTreeSet::<Vec<u8>>::new();
 
             for (proof, stv) in rows {
-                let mut open_proof = Vec::new();
-                push_expr(
-                    &mut open_proof,
-                    "open-proof",
-                    &[proof_type, goal, proof, stv],
-                );
-                remove.insert(&open_proof, ());
+                atom.clear();
+                push_expr(&mut atom, "open-proof", &[proof_type, goal, proof, stv]);
+                remove.insert(&atom, ());
 
-                let mut proved = Vec::new();
-                push_expr(&mut proved, "proved", &[proof_type, goal, proof, stv]);
-                add.insert(&proved, ());
+                atom.clear();
+                push_expr(&mut atom, "proved", &[proof_type, goal, proof, stv]);
+                add.insert(&atom, ());
 
                 let row_evidence = evidence
                     .get(proof_type.as_slice())
@@ -3373,17 +3700,16 @@ impl Sink for SimpleReviseProofsSink {
                         }
                     }
                     Some((merged_stv, merged_proof))
-                        if row_evidence
-                            .is_none_or(|row_evidence| {
-                                row_evidence.is_disjoint(&merged_evidence)
-                            }) =>
+                        if row_evidence.is_none_or(|row_evidence| {
+                            row_evidence.is_disjoint(&merged_evidence)
+                        }) =>
                     {
-                        let mut next_stv = Vec::new();
-                        push_expr(&mut next_stv, "merge", &[merged_stv, stv]);
-                        let mut next_proof = Vec::new();
-                        push_expr(&mut next_proof, "merge", &[merged_proof, proof]);
-                        *merged_stv = next_stv;
-                        *merged_proof = next_proof;
+                        merge_stv_scratch.clear();
+                        push_expr(&mut merge_stv_scratch, "merge", &[merged_stv, stv]);
+                        mem::swap(merged_stv, &mut merge_stv_scratch);
+                        merge_proof_scratch.clear();
+                        push_expr(&mut merge_proof_scratch, "merge", &[merged_proof, proof]);
+                        mem::swap(merged_proof, &mut merge_proof_scratch);
                         if let Some(row_evidence) = row_evidence {
                             merged_evidence.extend(row_evidence.iter().cloned());
                         }
@@ -3393,22 +3719,18 @@ impl Sink for SimpleReviseProofsSink {
             }
 
             if let Some((stv, proof)) = merged {
-                let mut revised = Vec::new();
-                push_expr(
-                    &mut revised,
-                    "revised",
-                    &[proof_type, goal, &stv, &proof],
-                );
-                add.insert(&revised, ());
+                atom.clear();
+                push_expr(&mut atom, "revised", &[proof_type, goal, &stv, &proof]);
+                add.insert(&atom, ());
 
                 for evidence in merged_evidence {
-                    let mut revised_evidence = Vec::new();
+                    atom.clear();
                     push_expr(
-                        &mut revised_evidence,
+                        &mut atom,
                         "revised-evidence",
                         &[proof_type, goal, &evidence],
                     );
-                    add.insert(&revised_evidence, ());
+                    add.insert(&atom, ());
                 }
             }
         }
@@ -3449,41 +3771,51 @@ impl Sink for ReviseProofsSink {
             unreachable!()
         };
         let mpath = &path[wz.root_prefix_path().len()..];
-        let args = expr_args(mpath);
-        assert!(
-            args.len() == 4 || args.len() == 5 || args.len() == 6 || args.len() == 7,
-            "revise-proofs expects 3, 4, 5, or 6 payload args"
-        );
-        assert_eq!(symbol_str(args[0]), "revise-proofs");
-
-        let group = self.groups.entry(args[1].to_vec()).or_default();
-        let empty_evidence = symbol_bytes("pnil");
-        match args.len() {
+        let Tag::Arity(arity) = byte_item(mpath[0]) else {
+            panic!("revise-proofs expects an expression");
+        };
+        match arity {
             4 => {
+                let [name, goal, proof, stv] =
+                    expr_args_exact::<4>(mpath).expect("checked revise-proofs arity");
+                assert_eq!(symbol_str(name), "revise-proofs");
+                let group = self.groups.entry(goal.to_vec()).or_default();
                 group
                     .proofs
-                    .insert((args[3].to_vec(), args[2].to_vec(), empty_evidence));
+                    .insert((stv.to_vec(), proof.to_vec(), symbol_bytes("pnil")));
             }
             5 => {
+                let [name, goal, proof, stv, evidence] =
+                    expr_args_exact::<5>(mpath).expect("checked revise-proofs arity");
+                assert_eq!(symbol_str(name), "revise-proofs");
+                let group = self.groups.entry(goal.to_vec()).or_default();
                 group
                     .proofs
-                    .insert((args[3].to_vec(), args[2].to_vec(), args[4].to_vec()));
+                    .insert((stv.to_vec(), proof.to_vec(), evidence.to_vec()));
             }
             6 => {
-                assert_eq!(symbol_str(args[2]), "existing");
-                group.existing_proofs.insert((
-                    args[4].to_vec(),
-                    args[3].to_vec(),
-                    args[5].to_vec(),
-                ));
+                let [name, goal, existing, proof, stv, evidence] =
+                    expr_args_exact::<6>(mpath).expect("checked revise-proofs arity");
+                assert_eq!(symbol_str(name), "revise-proofs");
+                assert_eq!(symbol_str(existing), "existing");
+                let group = self.groups.entry(goal.to_vec()).or_default();
+                group
+                    .existing_proofs
+                    .insert((stv.to_vec(), proof.to_vec(), evidence.to_vec()));
             }
             7 => {
+                let [name, goal, proof, stv, evidence, old_stv, old_evidence] =
+                    expr_args_exact::<7>(mpath).expect("checked revise-proofs arity");
+                assert_eq!(symbol_str(name), "revise-proofs");
+                let group = self.groups.entry(goal.to_vec()).or_default();
                 group
                     .proofs
-                    .insert((args[3].to_vec(), args[2].to_vec(), args[4].to_vec()));
-                group.old_facts.insert((args[5].to_vec(), args[6].to_vec()));
+                    .insert((stv.to_vec(), proof.to_vec(), evidence.to_vec()));
+                group
+                    .old_facts
+                    .insert((old_stv.to_vec(), old_evidence.to_vec()));
             }
-            _ => unreachable!(),
+            _ => panic!("revise-proofs expects 3, 4, 5, or 6 payload args"),
         }
     }
     fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
@@ -3505,6 +3837,7 @@ impl Sink for ReviseProofsSink {
         let mut remove_expr = Vec::with_capacity(256);
         let mut add_expr = Vec::with_capacity(256);
         let mut nested_expr = Vec::with_capacity(128);
+        let mut downstreams = Vec::new();
 
         for (goal, group) in &self.groups {
             let current_proofs = select_current_snapshot_proof_refs(&group.proofs);
@@ -3552,26 +3885,18 @@ impl Sink for ReviseProofsSink {
                     group
                         .existing_proofs
                         .iter()
-                        .filter(|(_stv, proof_id, _evset)| {
-                            is_canonical(proof_id)
-                        }),
+                        .filter(|(_stv, proof_id, _evset)| is_canonical(proof_id)),
                 );
-                factor_rows.extend(
-                    existing_goal_proofs
-                        .into_iter()
-                        .flatten()
-                        .filter(|stored| {
-                            is_canonical(&stored.1)
-                                && !current_proofs
-                                    .iter()
-                                    .zip(&recursive_current_proofs)
-                                    .any(|(current, recursive)| {
-                                        !*recursive
-                                            && is_canonical(&current.1)
-                                            && proof_identity_equal(stored, current)
-                                    })
-                        }),
-                );
+                factor_rows.extend(existing_goal_proofs.into_iter().flatten().filter(|stored| {
+                    is_canonical(&stored.1)
+                        && !current_proofs.iter().zip(&recursive_current_proofs).any(
+                            |(current, recursive)| {
+                                !*recursive
+                                    && is_canonical(&current.1)
+                                    && proof_identity_equal(stored, current)
+                            },
+                        )
+                }));
                 if !factor_rows.is_empty() {
                     factor_rows.extend(
                         current_proofs
@@ -3611,11 +3936,7 @@ impl Sink for ReviseProofsSink {
                 remove.insert(&remove_expr[..], ());
 
                 remove_expr.clear();
-                push_expr(
-                    &mut remove_expr,
-                    "fact-evidence",
-                    &[goal, old_stv, old_ev],
-                );
+                push_expr(&mut remove_expr, "fact-evidence", &[goal, old_stv, old_ev]);
                 remove.insert(&remove_expr[..], ());
             }
             for (current_index, current) in current_proofs.iter().enumerate() {
@@ -3657,8 +3978,9 @@ impl Sink for ReviseProofsSink {
                 // is already iterating the complete proof group. Doing this at
                 // proof revision avoids first-match exec ordering entirely.
                 if matches!(byte_item(goal[0]), Tag::Arity(_)) {
-                    let producer = expr_args(goal);
-                    if producer.len() == 5 && is_symbol(producer[0], "mm2-query-producer") {
+                    if let Some(producer) = expr_args_exact::<5>(goal)
+                        .filter(|producer| is_symbol(producer[0], "mm2-query-producer"))
+                    {
                         nested_expr.clear();
                         push_expr(&mut nested_expr, "query-producer", &[proof_id]);
                         add_expr.clear();
@@ -3669,11 +3991,11 @@ impl Sink for ReviseProofsSink {
                         );
                         add.insert(&add_expr, ());
 
-                        let mut downstreams = Vec::new();
+                        downstreams.clear();
                         if collect_pcons(producer[4], &mut downstreams) {
-                            for downstream in downstreams {
+                            for downstream in &downstreams {
                                 nested_expr.clear();
-                                push_expr(&mut nested_expr, "Goal", &[&downstream]);
+                                push_expr(&mut nested_expr, "Goal", &[downstream]);
                                 add_expr.clear();
                                 push_expr(&mut add_expr, ",", &[&nested_expr]);
                                 add.insert(&add_expr, ());
@@ -3749,10 +4071,10 @@ impl Sink for ScheduleRulesSink {
         let WriteResource::BTM(wz) = it.next().unwrap() else {
             unreachable!()
         };
-        let args = expr_args(&path[wz.root_prefix_path().len()..]);
-        assert_eq!(args.len(), 2, "schedule-rules expects one goal");
-        assert_eq!(symbol_str(args[0]), "schedule-rules");
-        self.goals.insert(args[1].to_vec());
+        let [name, goal] = expr_args_exact::<2>(&path[wz.root_prefix_path().len()..])
+            .expect("schedule-rules expects one goal");
+        assert_eq!(symbol_str(name), "schedule-rules");
+        self.goals.insert(goal.to_vec());
     }
 
     fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
@@ -3771,22 +4093,22 @@ impl Sink for ScheduleRulesSink {
         let mut add = PathMap::new();
         let mut rule = Vec::with_capacity(5);
         let mut pairs = Vec::with_capacity(1);
-        let mut instantiated_rule = Vec::new();
-        let mut apply_stack = Vec::new();
-        let mut assignments = Vec::new();
+        let mut instantiated_rule = Vec::with_capacity(256);
+        let mut apply_stack = Vec::with_capacity(32);
+        let mut assignments = Vec::with_capacity(32);
         let mut priority_cache = BTreeMap::<Vec<u8>, Vec<u8>>::new();
         let pnil = symbol_bytes("pnil");
         let pending_prefix = expr_prefix("pendingN", 6, &[]);
         let evidence_prefix = expr_prefix("pcons", 3, &[]);
         let rule_evidence_prefix = expr_prefix("rule-ev", 2, &[]);
-        let mut pending = Vec::new();
+        let mut pending = Vec::with_capacity(256);
 
         for goal in &self.goals {
             if !matches!(byte_item(goal[0]), Tag::Arity(_)) {
                 continue;
             }
-            let goal_args = expr_args(goal);
-            let Some(goal_head) = goal_args.first() else {
+            let mut goal_args = expr_args_iter(goal);
+            let Some(goal_head) = goal_args.next() else {
                 continue;
             };
             let goal_lookup_span = SinkProfileSpan::new("schedule-rules", "goal-lookup");
@@ -4881,13 +5203,9 @@ impl<Reduction: FloatReduction> Sink for FloatReductionSink<Reduction> {
         };
         if self.guarded {
             let mpath = &path[wz.root_prefix_path().len()..];
-            let args = expr_args(mpath);
-            assert_eq!(
-                args.len(),
-                5,
-                "{} guarded form expects 4 payload args",
-                Reduction::NAME
-            );
+            let args = expr_args_exact::<5>(mpath).unwrap_or_else(|| {
+                panic!("{} guarded form expects 4 payload args", Reduction::NAME)
+            });
             assert_eq!(symbol_str(args[0]), Reduction::NAME);
             self.guarded_unique.insert(mpath.to_vec());
             return;
@@ -4923,7 +5241,8 @@ impl<Reduction: FloatReduction> Sink for FloatReductionSink<Reduction> {
 
             let mut groups: BTreeMap<Vec<u8>, GuardedFloatGroup> = BTreeMap::new();
             for row in &self.guarded_unique {
-                let args = expr_args(row);
+                let args = expr_args_exact::<5>(row)
+                    .expect("stored guarded reduction row must remain valid");
                 let output = args[1].to_vec();
                 let output_var = args[2].to_vec();
                 let value = stv_f64(args[3], "reduction value");
@@ -5452,11 +5771,23 @@ impl Sink for ASink {
                 && *e.ptr.offset(3) == b'U'
         } {
             ASink::AUSink(AUSink::new(e))
-        } else if unsafe { *e.ptr == item_byte(Tag::Arity(3)) && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(4)) &&
-            *e.ptr.offset(2) == b'h' && *e.ptr.offset(3) == b'e' && *e.ptr.offset(4) == b'a' && *e.ptr.offset(5) == b'd' } {
+        } else if unsafe {
+            *e.ptr == item_byte(Tag::Arity(3))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(4))
+                && *e.ptr.offset(2) == b'h'
+                && *e.ptr.offset(3) == b'e'
+                && *e.ptr.offset(4) == b'a'
+                && *e.ptr.offset(5) == b'd'
+        } {
             ASink::HeadSink(HeadTailSink::new(e))
-        } else if unsafe { *e.ptr == item_byte(Tag::Arity(3)) && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(4)) &&
-            *e.ptr.offset(2) == b't' && *e.ptr.offset(3) == b'a' && *e.ptr.offset(4) == b'i' && *e.ptr.offset(5) == b'l' } {
+        } else if unsafe {
+            *e.ptr == item_byte(Tag::Arity(3))
+                && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(4))
+                && *e.ptr.offset(2) == b't'
+                && *e.ptr.offset(3) == b'a'
+                && *e.ptr.offset(4) == b'i'
+                && *e.ptr.offset(5) == b'l'
+        } {
             ASink::TailSink(HeadTailSink::new(e))
         } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(5))
@@ -5464,7 +5795,7 @@ impl Sink for ASink {
                 && &*slice_from_raw_parts(e.ptr.offset(2), 20) == b"revise-proofs-simple"
         } {
             ASink::SimpleReviseProofsSink(SimpleReviseProofsSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             (*e.ptr == item_byte(Tag::Arity(4))
                 || *e.ptr == item_byte(Tag::Arity(5))
                 || *e.ptr == item_byte(Tag::Arity(6))
@@ -5485,55 +5816,55 @@ impl Sink for ASink {
                 && *e.ptr.offset(14) == b's'
         } {
             ASink::ReviseProofsSink(ReviseProofsSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(2))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(14))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 14) == b"schedule-rules"
         } {
             ASink::ScheduleRulesSink(ScheduleRulesSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(8))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(19))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 19) == b"update-contribution"
         } {
             ASink::ContributionSink(ContributionSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             (*e.ptr == item_byte(Tag::Arity(4)) || *e.ptr == item_byte(Tag::Arity(5)))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(14))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 14) == b"fold-base-rate"
         } {
             ASink::BaseRateSink(BaseRateSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             (*e.ptr == item_byte(Tag::Arity(21)) || *e.ptr == item_byte(Tag::Arity(22)))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(14))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 14) == b"prior-rule-stv"
         } {
             ASink::PriorRuleStvSink(PriorRuleStvSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(4))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(11))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 11) == b"pair-counts"
         } {
             ASink::PairCountsSink(PairCountsSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(5))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(12))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 12) == b"dist-average"
         } {
             ASink::DistAverageSink(DistAverageSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(5))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(8))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 8) == b"dist-sum"
         } {
             ASink::DistSumSink(DistSumSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(8))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(6))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 6) == b"or-stv"
         } {
             ASink::OrStvSink(OrStvSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(11))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(17))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 17) == b"total-evidence-mp"
@@ -5663,7 +5994,10 @@ impl Sink for ASink {
                 e
             );
         } else {
-            panic!("unrecognized sink {}", serialize(unsafe { e.span().as_ref().unwrap() }))
+            panic!(
+                "unrecognized sink {}",
+                serialize(unsafe { e.span().as_ref().unwrap() })
+            )
         }
     }
 
