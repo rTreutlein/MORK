@@ -92,6 +92,19 @@ fn record_sink_timing(
     });
 }
 
+fn record_sink_count(sink: &'static str, phase: &'static str, calls: usize) {
+    if !sink_profiling_enabled() {
+        return;
+    }
+    SINK_TIMINGS.with(|timings| {
+        timings
+            .borrow_mut()
+            .entry((sink, phase))
+            .or_default()
+            .0 += calls;
+    });
+}
+
 pub(crate) struct SinkProfileSpan {
     sink: &'static str,
     phase: &'static str,
@@ -816,6 +829,23 @@ fn expr_args(bytes: &[u8]) -> Vec<&[u8]> {
         pos += len;
     }
     args
+}
+
+fn expr_args_exact<const N: usize>(bytes: &[u8]) -> Option<[&[u8]; N]> {
+    let Tag::Arity(arity) = byte_item(bytes[0]) else {
+        return None;
+    };
+    if arity as usize != N {
+        return None;
+    }
+    let mut args = [&[][..]; N];
+    let mut pos = 1;
+    for arg in &mut args {
+        let len = expr_len(&bytes[pos..]);
+        *arg = &bytes[pos..pos + len];
+        pos += len;
+    }
+    Some(args)
 }
 
 fn symbol_str(bytes: &[u8]) -> &str {
@@ -3746,8 +3776,9 @@ impl Sink for ScheduleRulesSink {
         let mut assignments = Vec::new();
         let mut priority_cache = BTreeMap::<Vec<u8>, Vec<u8>>::new();
         let pnil = symbol_bytes("pnil");
-        let mut rule_evidence = Vec::new();
-        let mut evidence = Vec::new();
+        let pending_prefix = expr_prefix("pendingN", 6, &[]);
+        let evidence_prefix = expr_prefix("pcons", 3, &[]);
+        let rule_evidence_prefix = expr_prefix("rule-ev", 2, &[]);
         let mut pending = Vec::new();
 
         for goal in &self.goals {
@@ -3853,50 +3884,55 @@ impl Sink for ScheduleRulesSink {
                     requires_fallback = true;
                     continue;
                 }
-                let instantiated = expr_args(&instantiated_rule);
-                if instantiated.len() != 5 {
+                let Some(instantiated) = expr_args_exact::<5>(&instantiated_rule) else {
                     requires_fallback = true;
                     continue;
-                }
-                let rule_stv = expr_args(instantiated[3]);
-                if rule_stv.len() != 3 {
+                };
+                let Some(rule_stv) = expr_args_exact::<3>(instantiated[3]) else {
                     requires_fallback = true;
                     continue;
-                }
-                let stv = expr_args(rule_stv[1]);
-                if stv.len() != 2 {
+                };
+                let Some(stv) = expr_args_exact::<2>(rule_stv[1]) else {
                     requires_fallback = true;
                     continue;
-                }
+                };
 
                 let confidence = stv_f64(stv[1], "rule confidence");
                 drop(instantiate_span);
 
                 let _emit_span = SinkProfileSpan::new("schedule-rules", "emit");
-                let priority = priority_cache.entry(stv[1].to_vec()).or_insert_with(|| {
+                if !priority_cache.contains_key(stv[1]) {
                     let text = hex::encode(binary_f64_symbol(1.0 - confidence));
-                    symbol_bytes(&text)
-                });
-                rule_evidence.clear();
-                push_expr(&mut rule_evidence, "rule-ev", &[instantiated[2]]);
-                evidence.clear();
-                push_expr(&mut evidence, "pcons", &[&rule_evidence, &pnil]);
+                    priority_cache.insert(stv[1].to_vec(), symbol_bytes(&text));
+                }
+                let priority = priority_cache
+                    .get(stv[1])
+                    .expect("priority was cached above");
                 pending.clear();
-                push_expr(
-                    &mut pending,
-                    "pendingN",
-                    &[
-                        priority,
-                        instantiated[1],
-                        instantiated[3],
-                        instantiated[4],
-                        &evidence,
-                    ],
+                pending.reserve(
+                    pending_prefix.len()
+                        + priority.len()
+                        + instantiated[1].len()
+                        + instantiated[3].len()
+                        + instantiated[4].len()
+                        + evidence_prefix.len()
+                        + rule_evidence_prefix.len()
+                        + instantiated[2].len()
+                        + pnil.len(),
                 );
-                add.insert(&pending, ());
+                pending.extend_from_slice(&pending_prefix);
+                pending.extend_from_slice(priority);
+                pending.extend_from_slice(instantiated[1]);
+                pending.extend_from_slice(instantiated[3]);
+                pending.extend_from_slice(instantiated[4]);
+                pending.extend_from_slice(&evidence_prefix);
+                pending.extend_from_slice(&rule_evidence_prefix);
+                pending.extend_from_slice(instantiated[2]);
+                pending.extend_from_slice(&pnil);
                 unsafe {
                     fused_rule_rows += 1;
                 }
+                add.insert(&pending, ());
                 matched = true;
             }
 
@@ -3909,6 +3945,9 @@ impl Sink for ScheduleRulesSink {
             }
         }
 
+        let unique_batch_rows = add.val_count();
+        record_sink_count("schedule-rules", "unique-batch-rows", unique_batch_rows);
+        record_sink_count("schedule-rules", "removed-goals", remove.val_count());
         self.goals.clear();
         let subtract_span = SinkProfileSpan::new("schedule-rules", "subtract");
         let removed = match wz.subtract_into(&remove.read_zipper(), true) {
