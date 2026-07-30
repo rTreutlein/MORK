@@ -833,6 +833,45 @@ fn expr_args(bytes: &[u8]) -> Vec<&[u8]> {
     args
 }
 
+struct ExprArgsIter<'a> {
+    bytes: &'a [u8],
+    remaining: u8,
+    pos: usize,
+}
+
+impl<'a> Iterator for ExprArgsIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let len = expr_len(&self.bytes[self.pos..]);
+        let arg = &self.bytes[self.pos..self.pos + len];
+        self.pos += len;
+        self.remaining -= 1;
+        Some(arg)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.remaining as usize;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for ExprArgsIter<'_> {}
+
+fn expr_args_iter(bytes: &[u8]) -> ExprArgsIter<'_> {
+    let Tag::Arity(arity) = byte_item(bytes[0]) else {
+        panic!("expected expression, got {}", serialize(bytes));
+    };
+    ExprArgsIter {
+        bytes,
+        remaining: arity,
+        pos: 1,
+    }
+}
+
 fn expr_args_exact<const N: usize>(bytes: &[u8]) -> Option<[&[u8]; N]> {
     let Tag::Arity(arity) = byte_item(bytes[0]) else {
         return None;
@@ -865,8 +904,8 @@ fn is_symbol(bytes: &[u8], name: &str) -> bool {
 }
 
 fn stv_parts(stv: &[u8]) -> (f64, f64) {
-    let args = expr_args(stv);
-    assert_eq!(args.len(), 2, "stv must have strength and confidence");
+    let args = expr_args_exact::<2>(stv)
+        .expect("stv must have strength and confidence");
     (stv_f64(args[0], "strength"), stv_f64(args[1], "confidence"))
 }
 
@@ -916,22 +955,27 @@ fn try_f64_bytes(bytes: &[u8]) -> Option<f64> {
     value.is_finite().then_some(if value == 0.0 { 0.0 } else { value })
 }
 
-fn binary_f64_bytes(value: f64, field: &str) -> Vec<u8> {
+fn push_binary_f64(out: &mut Vec<u8>, value: f64, field: &str) {
     assert!(value.is_finite(), "{field} must be finite");
     let value = if value == 0.0 { 0.0 } else { value };
-    let payload = binary_f64_symbol(value);
-    let mut out = vec![item_byte(Tag::SymbolSize(payload.len() as u8))];
-    out.extend_from_slice(&payload);
-    out
+    let raw = value.to_be_bytes();
+    let ambiguous_text = std::str::from_utf8(&raw).is_ok()
+        && (raw.iter().all(|byte| !byte.is_ascii_control())
+            || (raw.first() == Some(&b'"') && raw.last() == Some(&b'"')));
+    if ambiguous_text {
+        out.push(item_byte(Tag::SymbolSize(9)));
+        out.push(BINARY_F64_MARKER);
+    } else {
+        out.push(item_byte(Tag::SymbolSize(8)));
+    }
+    out.extend_from_slice(&raw);
 }
 
 fn stv_bytes(strength: f64, confidence: f64) -> Vec<u8> {
-    let strength_s = binary_f64_bytes(strength, "strength");
-    let confidence_s = binary_f64_bytes(confidence, "confidence");
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(19);
     out.push(item_byte(Tag::Arity(2)));
-    out.extend_from_slice(&strength_s);
-    out.extend_from_slice(&confidence_s);
+    push_binary_f64(&mut out, strength, "strength");
+    push_binary_f64(&mut out, confidence, "confidence");
     out
 }
 
@@ -983,32 +1027,26 @@ fn is_variable_expr(bytes: &[u8]) -> bool {
     }
 }
 
-fn alpha_equiv_inner(
-    left: &[u8],
-    right: &[u8],
-    left_to_right: &mut BTreeMap<Vec<u8>, Vec<u8>>,
-    right_to_left: &mut BTreeMap<Vec<u8>, Vec<u8>>,
+fn alpha_equiv_inner<'a>(
+    left: &'a [u8],
+    right: &'a [u8],
+    variables: &mut Vec<(&'a [u8], &'a [u8])>,
 ) -> bool {
     match (byte_item(left[0]), byte_item(right[0])) {
         (Tag::Arity(left_arity), Tag::Arity(right_arity)) if left_arity == right_arity => {
-            let left_args = expr_args(left);
-            let right_args = expr_args(right);
-            left_args
-                .iter()
-                .zip(right_args.iter())
-                .all(|(l, r)| alpha_equiv_inner(l, r, left_to_right, right_to_left))
+            expr_args_iter(left)
+                .zip(expr_args_iter(right))
+                .all(|(l, r)| alpha_equiv_inner(l, r, variables))
         }
         (_, _) if is_variable_expr(left) && is_variable_expr(right) => {
-            match (left_to_right.get(left), right_to_left.get(right)) {
-                (Some(mapped), Some(reverse)) => mapped == right && reverse == left,
-                (Some(mapped), None) => mapped == right,
-                (None, Some(reverse)) => reverse == left,
-                (None, None) => {
-                    left_to_right.insert(left.to_vec(), right.to_vec());
-                    right_to_left.insert(right.to_vec(), left.to_vec());
-                    true
-                }
+            if let Some((_, mapped)) = variables.iter().find(|(source, _)| *source == left) {
+                return *mapped == right;
             }
+            if variables.iter().any(|(_, mapped)| *mapped == right) {
+                return false;
+            }
+            variables.push((left, right));
+            true
         }
         (Tag::SymbolSize(_), Tag::SymbolSize(_))
             if !is_variable_expr(left) && !is_variable_expr(right) =>
@@ -1020,30 +1058,27 @@ fn alpha_equiv_inner(
 }
 
 fn alpha_equiv(left: &[u8], right: &[u8]) -> bool {
-    alpha_equiv_inner(left, right, &mut BTreeMap::new(), &mut BTreeMap::new())
+    alpha_equiv_inner(left, right, &mut Vec::new())
 }
 
-fn pattern_instance_inner(
-    pattern: &[u8],
-    value: &[u8],
-    bindings: &mut BTreeMap<Vec<u8>, Vec<u8>>,
+fn pattern_instance_inner<'a>(
+    pattern: &'a [u8],
+    value: &'a [u8],
+    bindings: &mut Vec<(&'a [u8], &'a [u8])>,
 ) -> bool {
     if is_variable_expr(pattern) {
-        return match bindings.get(pattern) {
-            Some(bound) => bound == value,
-            None => {
-                bindings.insert(pattern.to_vec(), value.to_vec());
-                true
-            }
-        };
+        if let Some((_, bound)) = bindings.iter().find(|(variable, _)| *variable == pattern) {
+            return *bound == value;
+        }
+        bindings.push((pattern, value));
+        return true;
     }
     match (byte_item(pattern[0]), byte_item(value[0])) {
         (Tag::Arity(pattern_arity), Tag::Arity(value_arity))
             if pattern_arity == value_arity =>
         {
-            expr_args(pattern)
-                .iter()
-                .zip(expr_args(value).iter())
+            expr_args_iter(pattern)
+                .zip(expr_args_iter(value))
                 .all(|(p, v)| pattern_instance_inner(p, v, bindings))
         }
         (Tag::SymbolSize(_), Tag::SymbolSize(_)) => pattern == value,
@@ -1052,7 +1087,7 @@ fn pattern_instance_inner(
 }
 
 fn pattern_instance(pattern: &[u8], value: &[u8]) -> bool {
-    pattern_instance_inner(pattern, value, &mut BTreeMap::new())
+    pattern_instance_inner(pattern, value, &mut Vec::new())
 }
 
 fn evidence_contains_rule(evidence: &[u8], rule: &[u8], allow_instance: bool) -> bool {
@@ -3475,41 +3510,53 @@ impl Sink for ReviseProofsSink {
             unreachable!()
         };
         let mpath = &path[wz.root_prefix_path().len()..];
-        let args = expr_args(mpath);
-        assert!(
-            args.len() == 4 || args.len() == 5 || args.len() == 6 || args.len() == 7,
-            "revise-proofs expects 3, 4, 5, or 6 payload args"
-        );
-        assert_eq!(symbol_str(args[0]), "revise-proofs");
-
-        let group = self.groups.entry(args[1].to_vec()).or_default();
-        let empty_evidence = symbol_bytes("pnil");
-        match args.len() {
+        let Tag::Arity(arity) = byte_item(mpath[0]) else {
+            panic!("revise-proofs expects an expression");
+        };
+        match arity {
             4 => {
+                let [name, goal, proof, stv] =
+                    expr_args_exact::<4>(mpath).expect("checked revise-proofs arity");
+                assert_eq!(symbol_str(name), "revise-proofs");
+                let group = self.groups.entry(goal.to_vec()).or_default();
                 group
                     .proofs
-                    .insert((args[3].to_vec(), args[2].to_vec(), empty_evidence));
+                    .insert((stv.to_vec(), proof.to_vec(), symbol_bytes("pnil")));
             }
             5 => {
+                let [name, goal, proof, stv, evidence] =
+                    expr_args_exact::<5>(mpath).expect("checked revise-proofs arity");
+                assert_eq!(symbol_str(name), "revise-proofs");
+                let group = self.groups.entry(goal.to_vec()).or_default();
                 group
                     .proofs
-                    .insert((args[3].to_vec(), args[2].to_vec(), args[4].to_vec()));
+                    .insert((stv.to_vec(), proof.to_vec(), evidence.to_vec()));
             }
             6 => {
-                assert_eq!(symbol_str(args[2]), "existing");
+                let [name, goal, existing, proof, stv, evidence] =
+                    expr_args_exact::<6>(mpath).expect("checked revise-proofs arity");
+                assert_eq!(symbol_str(name), "revise-proofs");
+                assert_eq!(symbol_str(existing), "existing");
+                let group = self.groups.entry(goal.to_vec()).or_default();
                 group.existing_proofs.insert((
-                    args[4].to_vec(),
-                    args[3].to_vec(),
-                    args[5].to_vec(),
+                    stv.to_vec(),
+                    proof.to_vec(),
+                    evidence.to_vec(),
                 ));
             }
             7 => {
+                let [name, goal, proof, stv, evidence, old_stv, old_evidence] =
+                    expr_args_exact::<7>(mpath).expect("checked revise-proofs arity");
+                assert_eq!(symbol_str(name), "revise-proofs");
+                let group = self.groups.entry(goal.to_vec()).or_default();
                 group
                     .proofs
-                    .insert((args[3].to_vec(), args[2].to_vec(), args[4].to_vec()));
-                group.old_facts.insert((args[5].to_vec(), args[6].to_vec()));
+                    .insert((stv.to_vec(), proof.to_vec(), evidence.to_vec()));
+                group
+                    .old_facts
+                    .insert((old_stv.to_vec(), old_evidence.to_vec()));
             }
-            _ => unreachable!(),
+            _ => panic!("revise-proofs expects 3, 4, 5, or 6 payload args"),
         }
     }
     fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
@@ -3775,10 +3822,10 @@ impl Sink for ScheduleRulesSink {
         let WriteResource::BTM(wz) = it.next().unwrap() else {
             unreachable!()
         };
-        let args = expr_args(&path[wz.root_prefix_path().len()..]);
-        assert_eq!(args.len(), 2, "schedule-rules expects one goal");
-        assert_eq!(symbol_str(args[0]), "schedule-rules");
-        self.goals.insert(args[1].to_vec());
+        let [name, goal] = expr_args_exact::<2>(&path[wz.root_prefix_path().len()..])
+            .expect("schedule-rules expects one goal");
+        assert_eq!(symbol_str(name), "schedule-rules");
+        self.goals.insert(goal.to_vec());
     }
 
     fn finalize<'w, 'a, 'k, It: Iterator<Item = WriteResource<'w, 'a, 'k>>>(
@@ -5490,7 +5537,7 @@ impl Sink for ASink {
                 && &*slice_from_raw_parts(e.ptr.offset(2), 20) == b"revise-proofs-simple"
         } {
             ASink::SimpleReviseProofsSink(SimpleReviseProofsSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             (*e.ptr == item_byte(Tag::Arity(4))
                 || *e.ptr == item_byte(Tag::Arity(5))
                 || *e.ptr == item_byte(Tag::Arity(6))
@@ -5511,55 +5558,55 @@ impl Sink for ASink {
                 && *e.ptr.offset(14) == b's'
         } {
             ASink::ReviseProofsSink(ReviseProofsSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(2))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(14))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 14) == b"schedule-rules"
         } {
             ASink::ScheduleRulesSink(ScheduleRulesSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(8))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(19))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 19) == b"update-contribution"
         } {
             ASink::ContributionSink(ContributionSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             (*e.ptr == item_byte(Tag::Arity(4)) || *e.ptr == item_byte(Tag::Arity(5)))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(14))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 14) == b"fold-base-rate"
         } {
             ASink::BaseRateSink(BaseRateSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             (*e.ptr == item_byte(Tag::Arity(21)) || *e.ptr == item_byte(Tag::Arity(22)))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(14))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 14) == b"prior-rule-stv"
         } {
             ASink::PriorRuleStvSink(PriorRuleStvSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(4))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(11))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 11) == b"pair-counts"
         } {
             ASink::PairCountsSink(PairCountsSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(5))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(12))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 12) == b"dist-average"
         } {
             ASink::DistAverageSink(DistAverageSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(5))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(8))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 8) == b"dist-sum"
         } {
             ASink::DistSumSink(DistSumSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(8))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(6))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 6) == b"or-stv"
         } {
             ASink::OrStvSink(OrStvSink::new(e))
-        } else if cfg!(feature = "pln") && unsafe {
+        } else if unsafe {
             *e.ptr == item_byte(Tag::Arity(11))
                 && *e.ptr.offset(1) == item_byte(Tag::SymbolSize(17))
                 && &*slice_from_raw_parts(e.ptr.offset(2), 17) == b"total-evidence-mp"
