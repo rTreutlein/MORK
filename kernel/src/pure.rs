@@ -1,44 +1,15 @@
-use base64::Engine;
-use eval::{EvalScope, FuncType};
-use eval_ffi::{EvalError, ExprSink, ExprSource, Tag};
-use hex;
 use log::trace;
-use mork_expr::{binary_f64_symbol, tagged_binary_f64, SourceItem, byte_item, item_byte};
 use std::io::Write;
 use std::ops::Div;
-
-trait PureNumberSymbol {
-    fn symbol_bytes(self) -> Vec<u8>;
-}
-
-macro_rules! impl_raw_number_symbol {
-    ($($t:ty),+ $(,)?) => {
-        $(impl PureNumberSymbol for $t {
-            fn symbol_bytes(self) -> Vec<u8> { self.to_be_bytes().to_vec() }
-        })+
-    };
-}
-
-impl_raw_number_symbol!(
-    u8, u16, u32, u64, u128, usize,
-    i8, i16, i32, i64, i128,
-    f32,
-);
-
-impl PureNumberSymbol for f64 {
-    fn symbol_bytes(self) -> Vec<u8> { binary_f64_symbol(self) }
-}
-
-fn pure_number_symbol<T: PureNumberSymbol>(value: T) -> Vec<u8> {
-    value.symbol_bytes()
-}
+use base64::Engine;
+use hex;
+use eval::{EvalScope, FuncType};
+use mork_expr::SourceItem;
+use eval_ffi::{ExprSink, ExprSource, EvalError, Tag};
 
 macro_rules! op {
     (num nary $name:ident($initial:expr, $t:ident: $tt:ty, $x:ident: $tx:ty) => $e:expr) => {
-        pub extern "C" fn $name(
-            expr: *mut ExprSource,
-            sink: *mut ExprSink,
-        ) -> Result<(), EvalError> {
+        pub extern "C" fn $name(expr: *mut ExprSource, sink: *mut ExprSink) -> Result<(), EvalError> {
             let expr = unsafe { &mut *expr };
             let sink = unsafe { &mut *sink };
             let items = expr.consume_head_check(stringify!($name).as_bytes())?;
@@ -47,154 +18,88 @@ macro_rules! op {
                 let $x = expr.consume::<$tx>()?;
                 $t = $e;
             }
-            let output = pure_number_symbol($t);
-            sink.write(SourceItem::Symbol(output.as_slice().into()))?;
+            sink.write(SourceItem::Symbol(($t).to_be_bytes()[..].into()))?;
             Ok(())
         }
     };
     (num quaternary $name:ident($x:ident: $tx:ty, $y:ident: $ty:ty, $z:ident: $tz:ty, $w:ident: $tw:ty) => $e:expr) => {
-        pub extern "C" fn $name(
-            expr: *mut ExprSource,
-            sink: *mut ExprSink,
-        ) -> Result<(), EvalError> {
+        pub extern "C" fn $name(expr: *mut ExprSource, sink: *mut ExprSink) -> Result<(), EvalError> {
             let expr = unsafe { &mut *expr };
             let sink = unsafe { &mut *sink };
             let items = expr.consume_head_check(stringify!($name).as_bytes())?;
-            if items != 4 {
-                return Err(EvalError::from(concat!(
-                    stringify!($name),
-                    " takes four arguments"
-                )));
-            }
+            if items != 3 { return Err(EvalError::from(concat!(stringify!($name), " takes three arguments"))) }
             let $x = expr.consume::<$tx>()?;
             let $y = expr.consume::<$ty>()?;
             let $z = expr.consume::<$tz>()?;
             let $w = expr.consume::<$tw>()?;
-            let output = pure_number_symbol($e);
-            sink.write(SourceItem::Symbol(output.as_slice().into()))?;
+            sink.write(SourceItem::Symbol(($e).to_be_bytes()[..].into()))?;
             Ok(())
         }
     };
     (num ternary $name:ident($x:ident: $tx:ty, $y:ident: $ty:ty, $z:ident: $tz:ty) => $e:expr) => {
-        pub extern "C" fn $name(
-            expr: *mut ExprSource,
-            sink: *mut ExprSink,
-        ) -> Result<(), EvalError> {
+        pub extern "C" fn $name(expr: *mut ExprSource, sink: *mut ExprSink) -> Result<(), EvalError> {
             let expr = unsafe { &mut *expr };
             let sink = unsafe { &mut *sink };
             let items = expr.consume_head_check(stringify!($name).as_bytes())?;
-            if items != 3 {
-                return Err(EvalError::from(concat!(
-                    stringify!($name),
-                    " takes three arguments"
-                )));
-            }
+            if items != 3 { return Err(EvalError::from(concat!(stringify!($name), " takes three arguments"))) }
             let $x = expr.consume::<$tx>()?;
             let $y = expr.consume::<$ty>()?;
             let $z = expr.consume::<$tz>()?;
-            let output = pure_number_symbol($e);
-            sink.write(SourceItem::Symbol(output.as_slice().into()))?;
+            sink.write(SourceItem::Symbol(($e).to_be_bytes()[..].into()))?;
             Ok(())
         }
     };
     (num binary $name:ident($x:ident: $tx:ty, $y:ident: $ty:ty) => $e:expr) => {
-        pub extern "C" fn $name(
-            expr: *mut ExprSource,
-            sink: *mut ExprSink,
-        ) -> Result<(), EvalError> {
+        pub extern "C" fn $name(expr: *mut ExprSource, sink: *mut ExprSink) -> Result<(), EvalError> {
             let expr = unsafe { &mut *expr };
             let sink = unsafe { &mut *sink };
             let items = expr.consume_head_check(stringify!($name).as_bytes())?;
-            if items != 2 {
-                return Err(EvalError::from(concat!(
-                    stringify!($name),
-                    " takes two arguments"
-                )));
-            }
+            if items != 2 { return Err(EvalError::from(concat!(stringify!($name), " takes two arguments"))) }
             let $x = expr.consume::<$tx>()?;
             let $y = expr.consume::<$ty>()?;
-            let output = pure_number_symbol($e);
-            sink.write(SourceItem::Symbol(output.as_slice().into()))?;
+            sink.write(SourceItem::Symbol(($e).to_be_bytes()[..].into()))?;
             Ok(())
         }
     };
     (num unary $name:ident($x:ident: $tx:ty) => $e:expr) => {
-        pub extern "C" fn $name(
-            expr: *mut ExprSource,
-            sink: *mut ExprSink,
-        ) -> Result<(), EvalError> {
+        pub extern "C" fn $name(expr: *mut ExprSource, sink: *mut ExprSink) -> Result<(), EvalError> {
             let expr = unsafe { &mut *expr };
             let sink = unsafe { &mut *sink };
             let items = expr.consume_head_check(stringify!($name).as_bytes())?;
-            if items != 1 {
-                return Err(EvalError::from(concat!(
-                    stringify!($name),
-                    " takes one argument"
-                )));
-            }
+            if items != 1 { return Err(EvalError::from(concat!(stringify!($name), " takes one argument"))) }
             let $x = expr.consume::<$tx>()?;
-            let output = pure_number_symbol($e);
-            sink.write(SourceItem::Symbol(output.as_slice().into()))?;
+            sink.write(SourceItem::Symbol(($e).to_be_bytes()[..].into()))?;
             Ok(())
         }
     };
     (num nulary $name:ident() => $e:expr) => {
-        pub extern "C" fn $name(
-            expr: *mut ExprSource,
-            sink: *mut ExprSink,
-        ) -> Result<(), EvalError> {
+        pub extern "C" fn $name(expr: *mut ExprSource, sink: *mut ExprSink) -> Result<(), EvalError> {
             let expr = unsafe { &mut *expr };
             let sink = unsafe { &mut *sink };
             let items = expr.consume_head_check(stringify!($name).as_bytes())?;
-            if items != 0 {
-                return Err(EvalError::from(concat!(
-                    stringify!($name),
-                    " takes no arguments"
-                )));
-            }
-            let output = pure_number_symbol($e);
-            sink.write(SourceItem::Symbol(output.as_slice().into()))?;
+            if items != 0 { return Err(EvalError::from(concat!(stringify!($name), " takes no arguments"))) }
+            sink.write(SourceItem::Symbol(($e).to_be_bytes()[..].into()))?;
             Ok(())
         }
     };
     (num from_string $name:ident<$t:ty>) => {
-        pub extern "C" fn $name(
-            expr: *mut ExprSource,
-            sink: *mut ExprSink,
-        ) -> Result<(), EvalError> {
+        pub extern "C" fn $name(expr: *mut ExprSource, sink: *mut ExprSink) -> Result<(), EvalError> {
             let expr = unsafe { &mut *expr };
             let sink = unsafe { &mut *sink };
             let items = expr.consume_head_check(stringify!($name).as_bytes())?;
-            if items != 1 {
-                return Err(EvalError::from("only takes one argument"));
-            }
-            let SourceItem::Symbol(symbol) = expr.read() else {
-                return Err(EvalError::from("only parses symbols"));
-            };
-            let result: $t = str::from_utf8(symbol)
-                .map_err(|_| {
-                    EvalError::from(concat!(stringify!($name), " parsing string not utf8"))
-                })?
-                .parse()
-                .map_err(|_| {
-                    EvalError::from(concat!("string not a valid type in ", stringify!($name)))
-                })?;
-            let output = pure_number_symbol(result);
-            sink.write(SourceItem::Symbol(output.as_slice().into()))?;
+            if items != 1 { return Err(EvalError::from("only takes one argument")) }
+            let SourceItem::Symbol(symbol) = expr.read() else { return Err(EvalError::from("only parses symbols")) };
+            let result: $t = str::from_utf8(symbol).map_err(|_| EvalError::from(concat!(stringify!($name), " parsing string not utf8")))?.parse().map_err(|_| EvalError::from(concat!("string not a valid type in ", stringify!($name))))?;
+            sink.write(SourceItem::Symbol(result.to_be_bytes()[..].into()))?;
             Ok(())
         }
     };
     (num to_string $name:ident<$t:ty>) => {
-        pub extern "C" fn $name(
-            expr: *mut ExprSource,
-            sink: *mut ExprSink,
-        ) -> Result<(), EvalError> {
+        pub extern "C" fn $name(expr: *mut ExprSource, sink: *mut ExprSink) -> Result<(), EvalError> {
             let expr = unsafe { &mut *expr };
             let sink = unsafe { &mut *sink };
             let items = expr.consume_head_check(stringify!($name).as_bytes())?;
-            if items != 1 {
-                return Err(EvalError::from("only takes one argument"));
-            }
+            if items != 1 { return Err(EvalError::from("only takes one argument")) }
             let x = expr.consume::<$t>()?;
             let mut buf = [0u8; 64];
             let mut cur = std::io::Cursor::new(&mut buf[..]);
@@ -205,266 +110,264 @@ macro_rules! op {
             Ok(())
         }
     };
-    (ternary_table($s:expr)($x:ident, $y:ident, $z:ident)) => {
-        match $s {
-            0 => 0,
-            1 => (!(($x | $y) | $z)),
-            2 => ($z & (!($x | $y))),
-            3 => (!($x | $y)),
-            4 => ($y & (!($x | $z))),
-            5 => (!($x | $z)),
-            6 => ((!$x) & ($y ^ $z)),
-            7 => (!($x | ($y & $z))),
-            8 => (($y & $z) & (!$x)),
-            9 => (!($x | ($y ^ $z))),
-            10 => ($z & (!$x)),
-            11 => ((!$x) & ($z | (!$y))),
-            12 => ($y & (!$x)),
-            13 => ((!$x) & ($y | (!$z))),
-            14 => ((!$x) & ($y | $z)),
-            15 => (!$x),
-            16 => ($x & (!($y | $z))),
-            17 => (!($y | $z)),
-            18 => ((!$y) & ($x ^ $z)),
-            19 => (!($y | ($x & $z))),
-            20 => ((!$z) & ($x ^ $y)),
-            21 => (!($z | ($x & $y))),
-            22 => ((((($x & $y) & $z) ^ $x) ^ $y) ^ $z),
-            23 => (!(($x | $y) & ($z | ($x & $y)))),
-            24 => (($x ^ $y) & ($x ^ $z)),
-            25 => (!(($x & $y) | ($y ^ $z))),
-            26 => (($z | ($x & $y)) ^ $x),
-            27 => (!(($z & ($x ^ $y)) ^ $y)),
-            28 => (($y | ($x & $z)) ^ $x),
-            29 => (!(($y & ($x ^ $z)) ^ $z)),
-            30 => (($y | $z) ^ $x),
-            31 => (!($x & ($y | $z))),
-            32 => (($x & $z) & (!$y)),
-            33 => (!($y | ($x ^ $z))),
-            34 => ($z & (!$y)),
-            35 => ((!$y) & ($z | (!$x))),
-            36 => (($x ^ $y) & ($y ^ $z)),
-            37 => (!(($x & $y) | ($x ^ $z))),
-            38 => (($z | ($x & $y)) ^ $y),
-            39 => (!(($z & ($x ^ $y)) ^ $x)),
-            40 => ($z & ($x ^ $y)),
-            41 => (!(($x & $y) | (($x ^ $y) ^ $z))),
-            42 => ($z & (!($x & $y))),
-            43 => (!((($x ^ $y) & ($y ^ $z)) ^ $x)),
-            44 => (($y | $z) & ($x ^ $y)),
-            45 => (($y | (!$z)) ^ $x),
-            46 => (($y | ($x ^ $z)) ^ $x),
-            47 => (!($x & ($y | (!$z)))),
-            48 => ($x & (!$y)),
-            49 => ((!$y) & ($x | (!$z))),
-            50 => ((!$y) & ($x | $z)),
-            51 => (!$y),
-            52 => (($x | ($y & $z)) ^ $y),
-            53 => (!(($x & ($y ^ $z)) ^ $z)),
-            54 => (($x | $z) ^ $y),
-            55 => (!($y & ($x | $z))),
-            56 => (($x | $z) & ($x ^ $y)),
-            57 => (($x | (!$z)) ^ $y),
-            58 => (($x | ($y ^ $z)) ^ $y),
-            59 => (!($y & ($x | (!$z)))),
-            60 => ($x ^ $y),
-            61 => ((!($x | $z)) | ($x ^ $y)),
-            62 => (($z & (!$x)) | ($x ^ $y)),
-            63 => (!($x & $y)),
-            64 => (($x & $y) & (!$z)),
-            65 => (!($z | ($x ^ $y))),
-            66 => (($x ^ $z) & ($y ^ $z)),
-            67 => (!(($x & $z) | ($x ^ $y))),
-            68 => ($y & (!$z)),
-            69 => ((!$z) & ($y | (!$x))),
-            70 => (($y | ($x & $z)) ^ $z),
-            71 => (!(($y & ($x ^ $z)) ^ $x)),
-            72 => ($y & ($x ^ $z)),
-            73 => (!(($x & $z) | (($x ^ $y) ^ $z))),
-            74 => (($y | $z) & ($x ^ $z)),
-            75 => (($z | (!$y)) ^ $x),
-            76 => ($y & (!($x & $z))),
-            77 => (!((($x ^ $z) & ($y ^ $z)) ^ $x)),
-            78 => (($z | ($x ^ $y)) ^ $x),
-            79 => (!($x & ($z | (!$y)))),
-            80 => ($x & (!$z)),
-            81 => ((!$z) & ($x | (!$y))),
-            82 => (($x | ($y & $z)) ^ $z),
-            83 => (!(($x & ($y ^ $z)) ^ $y)),
-            84 => ((!$z) & ($x | $y)),
-            85 => (!$z),
-            86 => (($x | $y) ^ $z),
-            87 => (!($z & ($x | $y))),
-            88 => (($x | $y) & ($x ^ $z)),
-            89 => (($x | (!$y)) ^ $z),
-            90 => ($x ^ $z),
-            91 => ((!($x | $y)) | ($x ^ $z)),
-            92 => (($x | ($y ^ $z)) ^ $z),
-            93 => (!($z & ($x | (!$y)))),
-            94 => (($y & (!$x)) | ($x ^ $z)),
-            95 => (!($x & $z)),
-            96 => ($x & ($y ^ $z)),
-            97 => (!(($y & $z) | (($x ^ $y) ^ $z))),
-            98 => (($x | $z) & ($y ^ $z)),
-            99 => (($z | (!$x)) ^ $y),
-            100 => (($x | $y) & ($y ^ $z)),
-            101 => (($y | (!$x)) ^ $z),
-            102 => ($y ^ $z),
-            103 => ((!($x | $y)) | ($y ^ $z)),
-            104 => ((((($x | $y) | $z) ^ $x) ^ $y) ^ $z),
-            105 => (!(($x ^ $y) ^ $z)),
-            106 => (($x & $y) ^ $z),
-            107 => (!(($x | $y) & (($x ^ $y) ^ $z))),
-            108 => (($x & $z) ^ $y),
-            109 => (!(($x | $z) & (($x ^ $y) ^ $z))),
-            110 => (($y & (!$x)) | ($y ^ $z)),
-            111 => ((!$x) | ($y ^ $z)),
-            112 => ($x & (!($y & $z))),
-            113 => (!((($x ^ $y) | ($x ^ $z)) ^ $x)),
-            114 => (($z | ($x ^ $y)) ^ $y),
-            115 => (!($y & ($z | (!$x)))),
-            116 => (($y | ($x ^ $z)) ^ $z),
-            117 => (!($z & ($y | (!$x)))),
-            118 => (($x & (!$y)) | ($y ^ $z)),
-            119 => (!($y & $z)),
-            120 => (($y & $z) ^ $x),
-            121 => (!(($y | $z) & (($x ^ $y) ^ $z))),
-            122 => (($x & (!$y)) | ($x ^ $z)),
-            123 => ((!$y) | ($x ^ $z)),
-            124 => (($x & (!$z)) | ($x ^ $y)),
-            125 => ((!$z) | ($x ^ $y)),
-            126 => (($x ^ $y) | ($x ^ $z)),
-            127 => (!(($x & $y) & $z)),
-            128 => (($x & $y) & $z),
-            129 => (!(($x ^ $y) | ($x ^ $z))),
-            130 => ($z & (!($x ^ $y))),
-            131 => ((!($x ^ $y)) & ($z | (!$x))),
-            132 => ($y & (!($x ^ $z))),
-            133 => ((!($x ^ $z)) & ($y | (!$x))),
-            134 => (($y | $z) & (($x ^ $y) ^ $z)),
-            135 => (!(($y & $z) ^ $x)),
-            136 => ($y & $z),
-            137 => (((($y | $z) | (!$x)) ^ $y) ^ $z),
-            138 => ($z & ($y | (!$x))),
-            139 => (!(($y | ($x ^ $z)) ^ $z)),
-            140 => ($y & ($z | (!$x))),
-            141 => (!(($z | ($x ^ $y)) ^ $y)),
-            142 => ((($x ^ $y) | ($x ^ $z)) ^ $x),
-            143 => (($y & $z) | (!$x)),
-            144 => ($x & (!($y ^ $z))),
-            145 => ((!($y ^ $z)) & ($x | (!$y))),
-            146 => (($x | $z) & (($x ^ $y) ^ $z)),
-            147 => (!(($x & $z) ^ $y)),
-            148 => (($x | $y) & (($x ^ $y) ^ $z)),
-            149 => (!(($x & $y) ^ $z)),
-            150 => (($x ^ $y) ^ $z),
-            151 => ((!($x | $y)) | (($x ^ $y) ^ $z)),
-            152 => (((($x | $y) | $z) ^ $y) ^ $z),
-            153 => (!($y ^ $z)),
-            154 => (($x & (!$y)) ^ $z),
-            155 => (!(($x | $y) & ($y ^ $z))),
-            156 => (($x & (!$z)) ^ $y),
-            157 => (!(($x | $z) & ($y ^ $z))),
-            158 => (($y & $z) | (($x ^ $y) ^ $z)),
-            159 => (!($x & ($y ^ $z))),
-            160 => ($x & $z),
-            161 => (((($x | $z) | (!$y)) ^ $x) ^ $z),
-            162 => ($z & ($x | (!$y))),
-            163 => (!(($x | ($y ^ $z)) ^ $z)),
-            164 => (((($x | $y) | $z) ^ $x) ^ $z),
-            165 => (!($x ^ $z)),
-            166 => (($y & (!$x)) ^ $z),
-            167 => (!(($x | $y) & ($x ^ $z))),
-            168 => ($z & ($x | $y)),
-            169 => (!(($x | $y) ^ $z)),
-            170 => $z,
-            171 => ($z | (!($x | $y))),
-            172 => (($x & ($y ^ $z)) ^ $y),
-            173 => (!(($x | ($y & $z)) ^ $z)),
-            174 => ($z | ($y & (!$x))),
-            175 => ($z | (!$x)),
-            176 => ($x & ($z | (!$y))),
-            177 => (!(($z | ($x ^ $y)) ^ $x)),
-            178 => ((($x ^ $z) & ($y ^ $z)) ^ $x),
-            179 => (($x & $z) | (!$y)),
-            180 => (($y & (!$z)) ^ $x),
-            181 => (!(($y | $z) & ($x ^ $z))),
-            182 => (($x & $z) | (($x ^ $y) ^ $z)),
-            183 => (!($y & ($x ^ $z))),
-            184 => (($y & ($x ^ $z)) ^ $x),
-            185 => (!(($y | ($x & $z)) ^ $z)),
-            186 => ($z | ($x & (!$y))),
-            187 => ($z | (!$y)),
-            188 => (($x & $z) | ($x ^ $y)),
-            189 => (!(($x ^ $z) & ($y ^ $z))),
-            190 => ($z | ($x ^ $y)),
-            191 => (!(($x & $y) & (!$z))),
-            192 => ($x & $y),
-            193 => (((($x | $y) | (!$z)) ^ $x) ^ $y),
-            194 => (((($x | $y) | $z) ^ $x) ^ $y),
-            195 => (!($x ^ $y)),
-            196 => ($y & ($x | (!$z))),
-            197 => (!(($x | ($y ^ $z)) ^ $y)),
-            198 => (($z & (!$x)) ^ $y),
-            199 => (!(($x | $z) & ($x ^ $y))),
-            200 => ($y & ($x | $z)),
-            201 => (!(($x | $z) ^ $y)),
-            202 => (($x & ($y ^ $z)) ^ $z),
-            203 => (!(($x | ($y & $z)) ^ $y)),
-            204 => $y,
-            205 => ($y | (!($x | $z))),
-            206 => ($y | ($z & (!$x))),
-            207 => ($y | (!$x)),
-            208 => ($x & ($y | (!$z))),
-            209 => (!(($y | ($x ^ $z)) ^ $x)),
-            210 => (($z & (!$y)) ^ $x),
-            211 => (!(($y | $z) & ($x ^ $y))),
-            212 => ((($x ^ $y) & ($y ^ $z)) ^ $x),
-            213 => (($x & $y) | (!$z)),
-            214 => (($x & $y) | (($x ^ $y) ^ $z)),
-            215 => (!($z & ($x ^ $y))),
-            216 => (($z & ($x ^ $y)) ^ $x),
-            217 => (!(($z | ($x & $y)) ^ $y)),
-            218 => (($x & $y) | ($x ^ $z)),
-            219 => (!(($x ^ $y) & ($y ^ $z))),
-            220 => ($y | ($x & (!$z))),
-            221 => ($y | (!$z)),
-            222 => ($y | ($x ^ $z)),
-            223 => (!(($x & $z) & (!$y))),
-            224 => ($x & ($y | $z)),
-            225 => (!(($y | $z) ^ $x)),
-            226 => (($y & ($x ^ $z)) ^ $z),
-            227 => (!(($y | ($x & $z)) ^ $x)),
-            228 => (($z & ($x ^ $y)) ^ $y),
-            229 => (!(($z | ($x & $y)) ^ $x)),
-            230 => (($x & $y) | ($y ^ $z)),
-            231 => (!(($x ^ $y) & ($x ^ $z))),
-            232 => (($x | $y) & ($z | ($x & $y))),
-            233 => (($x & $y) | (((!$z) ^ $x) ^ $y)),
-            234 => ($z | ($x & $y)),
-            235 => ($z | (!($x ^ $y))),
-            236 => ($y | ($x & $z)),
-            237 => ($y | (!($x ^ $z))),
-            238 => ($y | $z),
-            239 => (($y | $z) | (!$x)),
-            240 => $x,
-            241 => ($x | (!($y | $z))),
-            242 => ($x | ($z & (!$y))),
-            243 => ($x | (!$y)),
-            244 => ($x | ($y & (!$z))),
-            245 => ($x | (!$z)),
-            246 => ($x | ($y ^ $z)),
-            247 => (!(($y & $z) & (!$x))),
-            248 => ($x | ($y & $z)),
-            249 => ($x | (!($y ^ $z))),
-            250 => ($x | $z),
-            251 => (($x | $z) | (!$y)),
-            252 => ($x | $y),
-            253 => (($x | $y) | (!$z)),
-            254 => (($x | $y) | $z),
-            255 => !0,
-        }
-    };
+    (ternary_table($s:expr)($x:ident, $y:ident, $z:ident)) => { match $s {
+        0 => 0,
+        1 => (!(($x | $y) | $z)),
+        2 => ($z & (!($x | $y))),
+        3 => (!($x | $y)),
+        4 => ($y & (!($x | $z))),
+        5 => (!($x | $z)),
+        6 => ((!$x) & ($y ^ $z)),
+        7 => (!($x | ($y & $z))),
+        8 => (($y & $z) & (!$x)),
+        9 => (!($x | ($y ^ $z))),
+        10 => ($z & (!$x)),
+        11 => ((!$x) & ($z | (!$y))),
+        12 => ($y & (!$x)),
+        13 => ((!$x) & ($y | (!$z))),
+        14 => ((!$x) & ($y | $z)),
+        15 => (!$x),
+        16 => ($x & (!($y | $z))),
+        17 => (!($y | $z)),
+        18 => ((!$y) & ($x ^ $z)),
+        19 => (!($y | ($x & $z))),
+        20 => ((!$z) & ($x ^ $y)),
+        21 => (!($z | ($x & $y))),
+        22 => ((((($x & $y) & $z) ^ $x) ^ $y) ^ $z),
+        23 => (!(($x | $y) & ($z | ($x & $y)))),
+        24 => (($x ^ $y) & ($x ^ $z)),
+        25 => (!(($x & $y) | ($y ^ $z))),
+        26 => (($z | ($x & $y)) ^ $x),
+        27 => (!(($z & ($x ^ $y)) ^ $y)),
+        28 => (($y | ($x & $z)) ^ $x),
+        29 => (!(($y & ($x ^ $z)) ^ $z)),
+        30 => (($y | $z) ^ $x),
+        31 => (!($x & ($y | $z))),
+        32 => (($x & $z) & (!$y)),
+        33 => (!($y | ($x ^ $z))),
+        34 => ($z & (!$y)),
+        35 => ((!$y) & ($z | (!$x))),
+        36 => (($x ^ $y) & ($y ^ $z)),
+        37 => (!(($x & $y) | ($x ^ $z))),
+        38 => (($z | ($x & $y)) ^ $y),
+        39 => (!(($z & ($x ^ $y)) ^ $x)),
+        40 => ($z & ($x ^ $y)),
+        41 => (!(($x & $y) | (($x ^ $y) ^ $z))),
+        42 => ($z & (!($x & $y))),
+        43 => (!((($x ^ $y) & ($y ^ $z)) ^ $x)),
+        44 => (($y | $z) & ($x ^ $y)),
+        45 => (($y | (!$z)) ^ $x),
+        46 => (($y | ($x ^ $z)) ^ $x),
+        47 => (!($x & ($y | (!$z)))),
+        48 => ($x & (!$y)),
+        49 => ((!$y) & ($x | (!$z))),
+        50 => ((!$y) & ($x | $z)),
+        51 => (!$y),
+        52 => (($x | ($y & $z)) ^ $y),
+        53 => (!(($x & ($y ^ $z)) ^ $z)),
+        54 => (($x | $z) ^ $y),
+        55 => (!($y & ($x | $z))),
+        56 => (($x | $z) & ($x ^ $y)),
+        57 => (($x | (!$z)) ^ $y),
+        58 => (($x | ($y ^ $z)) ^ $y),
+        59 => (!($y & ($x | (!$z)))),
+        60 => ($x ^ $y),
+        61 => ((!($x | $z)) | ($x ^ $y)),
+        62 => (($z & (!$x)) | ($x ^ $y)),
+        63 => (!($x & $y)),
+        64 => (($x & $y) & (!$z)),
+        65 => (!($z | ($x ^ $y))),
+        66 => (($x ^ $z) & ($y ^ $z)),
+        67 => (!(($x & $z) | ($x ^ $y))),
+        68 => ($y & (!$z)),
+        69 => ((!$z) & ($y | (!$x))),
+        70 => (($y | ($x & $z)) ^ $z),
+        71 => (!(($y & ($x ^ $z)) ^ $x)),
+        72 => ($y & ($x ^ $z)),
+        73 => (!(($x & $z) | (($x ^ $y) ^ $z))),
+        74 => (($y | $z) & ($x ^ $z)),
+        75 => (($z | (!$y)) ^ $x),
+        76 => ($y & (!($x & $z))),
+        77 => (!((($x ^ $z) & ($y ^ $z)) ^ $x)),
+        78 => (($z | ($x ^ $y)) ^ $x),
+        79 => (!($x & ($z | (!$y)))),
+        80 => ($x & (!$z)),
+        81 => ((!$z) & ($x | (!$y))),
+        82 => (($x | ($y & $z)) ^ $z),
+        83 => (!(($x & ($y ^ $z)) ^ $y)),
+        84 => ((!$z) & ($x | $y)),
+        85 => (!$z),
+        86 => (($x | $y) ^ $z),
+        87 => (!($z & ($x | $y))),
+        88 => (($x | $y) & ($x ^ $z)),
+        89 => (($x | (!$y)) ^ $z),
+        90 => ($x ^ $z),
+        91 => ((!($x | $y)) | ($x ^ $z)),
+        92 => (($x | ($y ^ $z)) ^ $z),
+        93 => (!($z & ($x | (!$y)))),
+        94 => (($y & (!$x)) | ($x ^ $z)),
+        95 => (!($x & $z)),
+        96 => ($x & ($y ^ $z)),
+        97 => (!(($y & $z) | (($x ^ $y) ^ $z))),
+        98 => (($x | $z) & ($y ^ $z)),
+        99 => (($z | (!$x)) ^ $y),
+        100 => (($x | $y) & ($y ^ $z)),
+        101 => (($y | (!$x)) ^ $z),
+        102 => ($y ^ $z),
+        103 => ((!($x | $y)) | ($y ^ $z)),
+        104 => ((((($x | $y) | $z) ^ $x) ^ $y) ^ $z),
+        105 => (!(($x ^ $y) ^ $z)),
+        106 => (($x & $y) ^ $z),
+        107 => (!(($x | $y) & (($x ^ $y) ^ $z))),
+        108 => (($x & $z) ^ $y),
+        109 => (!(($x | $z) & (($x ^ $y) ^ $z))),
+        110 => (($y & (!$x)) | ($y ^ $z)),
+        111 => ((!$x) | ($y ^ $z)),
+        112 => ($x & (!($y & $z))),
+        113 => (!((($x ^ $y) | ($x ^ $z)) ^ $x)),
+        114 => (($z | ($x ^ $y)) ^ $y),
+        115 => (!($y & ($z | (!$x)))),
+        116 => (($y | ($x ^ $z)) ^ $z),
+        117 => (!($z & ($y | (!$x)))),
+        118 => (($x & (!$y)) | ($y ^ $z)),
+        119 => (!($y & $z)),
+        120 => (($y & $z) ^ $x),
+        121 => (!(($y | $z) & (($x ^ $y) ^ $z))),
+        122 => (($x & (!$y)) | ($x ^ $z)),
+        123 => ((!$y) | ($x ^ $z)),
+        124 => (($x & (!$z)) | ($x ^ $y)),
+        125 => ((!$z) | ($x ^ $y)),
+        126 => (($x ^ $y) | ($x ^ $z)),
+        127 => (!(($x & $y) & $z)),
+        128 => (($x & $y) & $z),
+        129 => (!(($x ^ $y) | ($x ^ $z))),
+        130 => ($z & (!($x ^ $y))),
+        131 => ((!($x ^ $y)) & ($z | (!$x))),
+        132 => ($y & (!($x ^ $z))),
+        133 => ((!($x ^ $z)) & ($y | (!$x))),
+        134 => (($y | $z) & (($x ^ $y) ^ $z)),
+        135 => (!(($y & $z) ^ $x)),
+        136 => ($y & $z),
+        137 => (((($y | $z) | (!$x)) ^ $y) ^ $z),
+        138 => ($z & ($y | (!$x))),
+        139 => (!(($y | ($x ^ $z)) ^ $z)),
+        140 => ($y & ($z | (!$x))),
+        141 => (!(($z | ($x ^ $y)) ^ $y)),
+        142 => ((($x ^ $y) | ($x ^ $z)) ^ $x),
+        143 => (($y & $z) | (!$x)),
+        144 => ($x & (!($y ^ $z))),
+        145 => ((!($y ^ $z)) & ($x | (!$y))),
+        146 => (($x | $z) & (($x ^ $y) ^ $z)),
+        147 => (!(($x & $z) ^ $y)),
+        148 => (($x | $y) & (($x ^ $y) ^ $z)),
+        149 => (!(($x & $y) ^ $z)),
+        150 => (($x ^ $y) ^ $z),
+        151 => ((!($x | $y)) | (($x ^ $y) ^ $z)),
+        152 => (((($x | $y) | $z) ^ $y) ^ $z),
+        153 => (!($y ^ $z)),
+        154 => (($x & (!$y)) ^ $z),
+        155 => (!(($x | $y) & ($y ^ $z))),
+        156 => (($x & (!$z)) ^ $y),
+        157 => (!(($x | $z) & ($y ^ $z))),
+        158 => (($y & $z) | (($x ^ $y) ^ $z)),
+        159 => (!($x & ($y ^ $z))),
+        160 => ($x & $z),
+        161 => (((($x | $z) | (!$y)) ^ $x) ^ $z),
+        162 => ($z & ($x | (!$y))),
+        163 => (!(($x | ($y ^ $z)) ^ $z)),
+        164 => (((($x | $y) | $z) ^ $x) ^ $z),
+        165 => (!($x ^ $z)),
+        166 => (($y & (!$x)) ^ $z),
+        167 => (!(($x | $y) & ($x ^ $z))),
+        168 => ($z & ($x | $y)),
+        169 => (!(($x | $y) ^ $z)),
+        170 => $z,
+        171 => ($z | (!($x | $y))),
+        172 => (($x & ($y ^ $z)) ^ $y),
+        173 => (!(($x | ($y & $z)) ^ $z)),
+        174 => ($z | ($y & (!$x))),
+        175 => ($z | (!$x)),
+        176 => ($x & ($z | (!$y))),
+        177 => (!(($z | ($x ^ $y)) ^ $x)),
+        178 => ((($x ^ $z) & ($y ^ $z)) ^ $x),
+        179 => (($x & $z) | (!$y)),
+        180 => (($y & (!$z)) ^ $x),
+        181 => (!(($y | $z) & ($x ^ $z))),
+        182 => (($x & $z) | (($x ^ $y) ^ $z)),
+        183 => (!($y & ($x ^ $z))),
+        184 => (($y & ($x ^ $z)) ^ $x),
+        185 => (!(($y | ($x & $z)) ^ $z)),
+        186 => ($z | ($x & (!$y))),
+        187 => ($z | (!$y)),
+        188 => (($x & $z) | ($x ^ $y)),
+        189 => (!(($x ^ $z) & ($y ^ $z))),
+        190 => ($z | ($x ^ $y)),
+        191 => (!(($x & $y) & (!$z))),
+        192 => ($x & $y),
+        193 => (((($x | $y) | (!$z)) ^ $x) ^ $y),
+        194 => (((($x | $y) | $z) ^ $x) ^ $y),
+        195 => (!($x ^ $y)),
+        196 => ($y & ($x | (!$z))),
+        197 => (!(($x | ($y ^ $z)) ^ $y)),
+        198 => (($z & (!$x)) ^ $y),
+        199 => (!(($x | $z) & ($x ^ $y))),
+        200 => ($y & ($x | $z)),
+        201 => (!(($x | $z) ^ $y)),
+        202 => (($x & ($y ^ $z)) ^ $z),
+        203 => (!(($x | ($y & $z)) ^ $y)),
+        204 => $y,
+        205 => ($y | (!($x | $z))),
+        206 => ($y | ($z & (!$x))),
+        207 => ($y | (!$x)),
+        208 => ($x & ($y | (!$z))),
+        209 => (!(($y | ($x ^ $z)) ^ $x)),
+        210 => (($z & (!$y)) ^ $x),
+        211 => (!(($y | $z) & ($x ^ $y))),
+        212 => ((($x ^ $y) & ($y ^ $z)) ^ $x),
+        213 => (($x & $y) | (!$z)),
+        214 => (($x & $y) | (($x ^ $y) ^ $z)),
+        215 => (!($z & ($x ^ $y))),
+        216 => (($z & ($x ^ $y)) ^ $x),
+        217 => (!(($z | ($x & $y)) ^ $y)),
+        218 => (($x & $y) | ($x ^ $z)),
+        219 => (!(($x ^ $y) & ($y ^ $z))),
+        220 => ($y | ($x & (!$z))),
+        221 => ($y | (!$z)),
+        222 => ($y | ($x ^ $z)),
+        223 => (!(($x & $z) & (!$y))),
+        224 => ($x & ($y | $z)),
+        225 => (!(($y | $z) ^ $x)),
+        226 => (($y & ($x ^ $z)) ^ $z),
+        227 => (!(($y | ($x & $z)) ^ $x)),
+        228 => (($z & ($x ^ $y)) ^ $y),
+        229 => (!(($z | ($x & $y)) ^ $x)),
+        230 => (($x & $y) | ($y ^ $z)),
+        231 => (!(($x ^ $y) & ($x ^ $z))),
+        232 => (($x | $y) & ($z | ($x & $y))),
+        233 => (($x & $y) | (((!$z) ^ $x) ^ $y)),
+        234 => ($z | ($x & $y)),
+        235 => ($z | (!($x ^ $y))),
+        236 => ($y | ($x & $z)),
+        237 => ($y | (!($x ^ $z))),
+        238 => ($y | $z),
+        239 => (($y | $z) | (!$x)),
+        240 => $x,
+        241 => ($x | (!($y | $z))),
+        242 => ($x | ($z & (!$y))),
+        243 => ($x | (!$y)),
+        244 => ($x | ($y & (!$z))),
+        245 => ($x | (!$z)),
+        246 => ($x | ($y ^ $z)),
+        247 => (!(($y & $z) & (!$x))),
+        248 => ($x | ($y & $z)),
+        249 => ($x | (!($y ^ $z))),
+        250 => ($x | $z),
+        251 => (($x | $z) | (!$y)),
+        252 => ($x | $y),
+        253 => (($x | $y) | (!$z)),
+        254 => (($x | $y) | $z),
+        255 => !0,
+    }};
 }
 
 op!(num nulary u8_zeros() => 0u8);
@@ -726,7 +629,8 @@ op!(num nulary neginf_f64() => f64::NEG_INFINITY);
 op!(num nulary e_f64() => std::f64::consts::E);
 op!(num nulary pi_f64() => std::f64::consts::PI);
 op!(num nulary tau_f64() => std::f64::consts::TAU);
-op!(num nulary phi_f64() => 1.618033988749895_f64);
+// op!(num nulary phi_f64() => std::f64::consts::PHI); // pre https://github.com/rust-lang/rust/pull/151164
+op!(num nulary phi_f64() => std::f64::consts::GOLDEN_RATIO);
 op!(num unary to_radians_f64(x: f64) => x.to_radians());
 op!(num unary to_degrees_f64(x: f64) => x.to_degrees());
 op!(num unary sin_f64(x: f64) => x.sin());
@@ -774,715 +678,9 @@ op!(num binary gt_f64(x: f64, y: f64) => (x > y) as i8);
 op!(num binary lte_f64(x: f64, y: f64) => (x <= y) as i8);
 op!(num binary gte_f64(x: f64, y: f64) => (x >= y) as i8);
 op!(num binary eq_f64(x: f64, y: f64) => (x == y) as i8);
-
 op!(num binary ne_f64(x: f64, y: f64) => (x != y) as i8);
 op!(num from_string f64_from_string<f64>);
 op!(num to_string f64_to_string<f64>);
-
-const PLN_EVIDENCE_CONFIDENCE_K: f64 = 800.0;
-
-// PeTTaChainer chainer_utils.metta: (/ (* $conf 800) (- 1 (min-atom ($conf 0.9999))))
-fn pln_confidence_to_count(confidence: f64) -> f64 {
-    if confidence <= 0.0 {
-        0.0
-    } else {
-        PLN_EVIDENCE_CONFIDENCE_K * confidence / (1.0 - confidence.min(0.9999))
-    }
-}
-
-fn pln_ideal_clip(strength: f64) -> f64 {
-    strength.clamp(0.000001, 0.999999)
-}
-
-fn pln_ideal_var(strength: f64, confidence: f64) -> f64 {
-    let clipped_strength = pln_ideal_clip(strength);
-    clipped_strength * (1.0 - clipped_strength) / (pln_confidence_to_count(confidence) + 1.0)
-}
-
-fn pln_ideal_conf_from_var(strength: f64, var: f64) -> f64 {
-    if var <= 0.0 {
-        return 0.9999;
-    }
-    let clipped_strength = pln_ideal_clip(strength);
-    let maxvar = clipped_strength * (1.0 - clipped_strength);
-    let n = maxvar / var.min(maxvar) - 1.0;
-    (n / (n + PLN_EVIDENCE_CONFIDENCE_K)).max(0.000001)
-}
-
-fn pln_marginal_proj_confidence(sab: f64, cab: f64) -> f64 {
-    let count = sab * pln_confidence_to_count(cab);
-    count / (count + PLN_EVIDENCE_CONFIDENCE_K)
-}
-
-fn pln_ideal_prod_confidence(s1: f64, v1: f64, s2: f64, v2: f64, strength: f64) -> f64 {
-    let var = (v1 * v2) + ((v1 * (s2 * s2)) + ((s1 * s1) * v2));
-    pln_ideal_conf_from_var(strength, var)
-}
-
-fn pln_and_confidence(s1: f64, c1: f64, s2: f64, c2: f64) -> f64 {
-    if c1 <= 0.0 || c2 <= 0.0 {
-        return 0.0;
-    }
-    let strength = s1 * s2;
-    let v1 = pln_ideal_var(s1, c1);
-    let v2 = pln_ideal_var(s2, c2);
-    pln_ideal_prod_confidence(s1, v1, s2, v2, strength)
-}
-
-fn pln_or_confidence(s1: f64, c1: f64, s2: f64, c2: f64) -> f64 {
-    if c1 <= 0.0 || c2 <= 0.0 {
-        return 0.0;
-    }
-    let strength = s1 + s2 - (s1 * s2);
-    let v1 = pln_ideal_var(s1, c1);
-    let v2 = pln_ideal_var(s2, c2);
-    pln_ideal_prod_confidence(1.0 - s1, v1, 1.0 - s2, v2, strength)
-}
-
-// PeTTaChainer tv_formulas.metta ideal-mp-confidence: propagate the exact
-// variance of sB = bs_a*as + bs_na*(1-as) through modus ponens.
-fn pln_mp_confidence(as_: f64, ac: f64, bs_a: f64, bc_a: f64, bs_na: f64, bc_na: f64) -> f64 {
-    let va = pln_ideal_var(bs_a, bc_a);
-    let vna = pln_ideal_var(bs_na, bc_na);
-    let vz = pln_ideal_var(as_, ac);
-    let s_b = bs_a * as_ + bs_na * (1.0 - as_);
-    let vars_b = ((as_ * as_) * va)
-        + ((((1.0 - as_) * (1.0 - as_)) * vna)
-            + ((((bs_a - bs_na) * (bs_a - bs_na)) * vz) + (vz * (va + vna))));
-    pln_ideal_conf_from_var(s_b, vars_b)
-}
-
-pub extern "C" fn pln_mp_confidence_f64(
-    expr: *mut ExprSource,
-    sink: *mut ExprSink,
-) -> Result<(), EvalError> {
-    let expr = unsafe { &mut *expr };
-    let sink = unsafe { &mut *sink };
-    let items = expr.consume_head_check(b"pln_mp_confidence_f64")?;
-    if items != 6 {
-        return Err(EvalError::from("pln_mp_confidence_f64 takes six arguments"));
-    }
-    let as_ = expr.consume::<f64>()?;
-    let ac = expr.consume::<f64>()?;
-    let bs_a = expr.consume::<f64>()?;
-    let bc_a = expr.consume::<f64>()?;
-    let bs_na = expr.consume::<f64>()?;
-    let bc_na = expr.consume::<f64>()?;
-    let output = pure_number_symbol(pln_mp_confidence(as_, ac, bs_a, bc_a, bs_na, bc_na));
-    sink.write(SourceItem::Symbol(output.as_slice().into()))?;
-    Ok(())
-}
-
-pub extern "C" fn pln_mp_stv(
-    expr: *mut ExprSource,
-    sink: *mut ExprSink,
-) -> Result<(), EvalError> {
-    let expr = unsafe { &mut *expr };
-    let sink = unsafe { &mut *sink };
-    let items = expr.consume_head_check(b"pln_mp_stv")?;
-    if items != 6 {
-        return Err(EvalError::from("pln_mp_stv takes six arguments"));
-    }
-    let as_ = expr.consume::<f64>()?;
-    let ac = expr.consume::<f64>()?;
-    let bs_a = expr.consume::<f64>()?;
-    let bc_a = expr.consume::<f64>()?;
-    let bs_na = expr.consume::<f64>()?;
-    let bc_na = expr.consume::<f64>()?;
-    let strength = (bs_a * as_) + (bs_na * (1.0 - as_));
-    let confidence = pln_mp_confidence(as_, ac, bs_a, bc_a, bs_na, bc_na);
-    sink.extend_from_slice(&pool_stv_bytes(strength, confidence))?;
-    Ok(())
-}
-
-// PeTTaChainer tv_formulas.metta CTVInversionFormula helpers. The negative
-// branch reuses the same ops with complemented sb / sb_a arguments (ideal-var
-// is symmetric in s vs 1-s, so the variances come out identical to PeTTa's).
-fn pln_inv_out_of_range(sb: f64) -> bool {
-    sb <= 0.0 || sb >= 1.0
-}
-
-op!(num ternary pln_inv_strength_f64(sa: f64, sb: f64, sb_a: f64) => {
-    if pln_inv_out_of_range(sb) { 0.0 } else { ((sb_a * sa) / sb).min(1.0) }
-});
-
-fn pln_ideal_ratio_var(p: f64, vp: f64, sa: f64, vsa: f64, q: f64, vq: f64) -> f64 {
-    let d1 = sa / q;
-    let d2 = p / q;
-    let d3 = (p * sa) / (q * q);
-    (d1 * d1) * vp + (d2 * d2) * vsa + (d3 * d3) * vq
-}
-
-fn pln_inv_confidence(sa: f64, ca: f64, sb: f64, cb: f64, sb_a: f64, cb_a: f64) -> f64 {
-    if pln_inv_out_of_range(sb) {
-        return 0.0;
-    }
-    let va = pln_ideal_var(sb_a, cb_a);
-    let vsa = pln_ideal_var(sa, ca);
-    let vsb = pln_ideal_var(sb, cb);
-    let s = ((sb_a * sa) / sb).min(1.0);
-    pln_ideal_conf_from_var(s, pln_ideal_ratio_var(sb_a, va, sa, vsa, sb, vsb))
-}
-
-pub extern "C" fn pln_inv_confidence_f64(
-    expr: *mut ExprSource,
-    sink: *mut ExprSink,
-) -> Result<(), EvalError> {
-    let expr = unsafe { &mut *expr };
-    let sink = unsafe { &mut *sink };
-    let items = expr.consume_head_check(b"pln_inv_confidence_f64")?;
-    if items != 6 {
-        return Err(EvalError::from(
-            "pln_inv_confidence_f64 takes six arguments",
-        ));
-    }
-    let sa = expr.consume::<f64>()?;
-    let ca = expr.consume::<f64>()?;
-    let sb = expr.consume::<f64>()?;
-    let cb = expr.consume::<f64>()?;
-    let sb_a = expr.consume::<f64>()?;
-    let cb_a = expr.consume::<f64>()?;
-    let output = pure_number_symbol(pln_inv_confidence(sa, ca, sb, cb, sb_a, cb_a));
-    sink.write(SourceItem::Symbol(output.as_slice().into()))?;
-    Ok(())
-}
-
-// 1.0 when the inversion may fire, 0.0 when PeTTa's CTVInversionFormula
-// rejects it: either base rate is no-evidence (exactly (0.0 0.0)), or the
-// implication's positive strength lies outside the Frechet bounds set by the
-// base rates (InversionConsistency).
-fn pln_inversion_valid(sa: f64, ca: f64, sb: f64, cb: f64, sb_a: f64) -> f64 {
-    if (sa == 0.0 && ca == 0.0) || (sb == 0.0 && cb == 0.0) {
-        return 0.0;
-    }
-    if pln_inv_out_of_range(sb) {
-        return 1.0;
-    }
-    if sa > 0.0 {
-        let smallest = ((sa + sb - 1.0) / sa).max(0.0);
-        let largest = (sb / sa).min(1.0);
-        let consistent = sa > 0.0 && sb > 0.0 && smallest <= sb_a && sb_a <= largest;
-        if !consistent {
-            return 0.0;
-        }
-    }
-    1.0
-}
-
-pub extern "C" fn pln_inversion_valid_f64(
-    expr: *mut ExprSource,
-    sink: *mut ExprSink,
-) -> Result<(), EvalError> {
-    let expr = unsafe { &mut *expr };
-    let sink = unsafe { &mut *sink };
-    let items = expr.consume_head_check(b"pln_inversion_valid_f64")?;
-    if items != 5 {
-        return Err(EvalError::from(
-            "pln_inversion_valid_f64 takes five arguments",
-        ));
-    }
-    let sa = expr.consume::<f64>()?;
-    let ca = expr.consume::<f64>()?;
-    let sb = expr.consume::<f64>()?;
-    let cb = expr.consume::<f64>()?;
-    let sb_a = expr.consume::<f64>()?;
-    let output = pure_number_symbol(pln_inversion_valid(sa, ca, sb, cb, sb_a));
-    sink.write(SourceItem::Symbol(output.as_slice().into()))?;
-    Ok(())
-}
-
-pub extern "C" fn pln_and_confidence_f64(
-    expr: *mut ExprSource,
-    sink: *mut ExprSink,
-) -> Result<(), EvalError> {
-    let expr = unsafe { &mut *expr };
-    let sink = unsafe { &mut *sink };
-    let items = expr.consume_head_check(b"pln_and_confidence_f64")?;
-    if items != 4 {
-        return Err(EvalError::from(
-            "pln_and_confidence_f64 takes four arguments",
-        ));
-    }
-    let s1 = expr.consume::<f64>()?;
-    let c1 = expr.consume::<f64>()?;
-    let s2 = expr.consume::<f64>()?;
-    let c2 = expr.consume::<f64>()?;
-    let output = pure_number_symbol(pln_and_confidence(s1, c1, s2, c2));
-    sink.write(SourceItem::Symbol(output.as_slice().into()))?;
-    Ok(())
-}
-
-op!(num quaternary pln_or_confidence_f64(s1: f64, c1: f64, s2: f64, c2: f64) => {
-    pln_or_confidence(s1, c1, s2, c2)
-});
-
-fn pool_symbol_bytes(s: &str) -> Vec<u8> {
-    let mut out = vec![item_byte(Tag::SymbolSize(s.len() as u8))];
-    out.extend_from_slice(s.as_bytes());
-    out
-}
-
-fn pool_push_expr(out: &mut Vec<u8>, name: &str, args: &[&[u8]]) {
-    out.push(item_byte(Tag::Arity((args.len() + 1) as u8)));
-    out.extend_from_slice(&pool_symbol_bytes(name));
-    for arg in args {
-        out.extend_from_slice(arg);
-    }
-}
-
-fn pool_item_len(bytes: &[u8]) -> usize {
-    match byte_item(bytes[0]) {
-        Tag::SymbolSize(size) => 1 + size as usize,
-        Tag::Arity(arity) => {
-            let mut offset = 1;
-            for _ in 0..arity {
-                let len = pool_item_len(&bytes[offset..]);
-                offset += len;
-            }
-            offset
-        }
-        Tag::NewVar | Tag::VarRef(_) => 1,
-    }
-}
-
-fn pool_expr_args(bytes: &[u8]) -> Vec<&[u8]> {
-    let Tag::Arity(arity) = byte_item(bytes[0]) else {
-        return Vec::new();
-    };
-    let mut out = Vec::with_capacity(arity as usize);
-    let mut offset = 1;
-    for _ in 0..arity {
-        let len = pool_item_len(&bytes[offset..]);
-        out.push(&bytes[offset..offset + len]);
-        offset += len;
-    }
-    out
-}
-
-fn pool_is_symbol(bytes: &[u8], name: &str) -> bool {
-    let Tag::SymbolSize(size) = byte_item(bytes[0]) else {
-        return false;
-    };
-    size as usize == name.len() && &bytes[1..1 + size as usize] == name.as_bytes()
-}
-
-fn pool_symbol_str(bytes: &[u8]) -> Option<&str> {
-    let Tag::SymbolSize(size) = byte_item(bytes[0]) else {
-        return None;
-    };
-    std::str::from_utf8(&bytes[1..1 + size as usize]).ok()
-}
-
-fn pool_stv_parts(stv: &[u8]) -> Option<(f64, f64)> {
-    let args = pool_expr_args(stv);
-    if args.len() != 2 {
-        return None;
-    }
-    Some((pool_symbol_f64(args[0])?, pool_symbol_f64(args[1])?))
-}
-
-fn pool_symbol_f64(bytes: &[u8]) -> Option<f64> {
-    let Tag::SymbolSize(size) = byte_item(bytes[0]) else { return None };
-    let bytes = &bytes[1..1 + size as usize];
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        if let Ok(value) = text.parse::<f64>() {
-            return value.is_finite().then_some(if value == 0.0 { 0.0 } else { value });
-        }
-    }
-    if let Some(value) = tagged_binary_f64(bytes) {
-        return value.is_finite().then_some(if value == 0.0 { 0.0 } else { value });
-    }
-    let value = f64::from_be_bytes(bytes.try_into().ok()?);
-    value.is_finite().then_some(if value == 0.0 { 0.0 } else { value })
-}
-
-fn pool_stv_bytes(strength: f64, confidence: f64) -> Vec<u8> {
-    assert!(strength.is_finite(), "strength must be finite");
-    assert!(confidence.is_finite(), "confidence must be finite");
-    let strength = if strength == 0.0 { 0.0 } else { strength };
-    let confidence = if confidence == 0.0 { 0.0 } else { confidence };
-    let strength_payload = binary_f64_symbol(strength);
-    let confidence_payload = binary_f64_symbol(confidence);
-    let mut strength_s = vec![item_byte(Tag::SymbolSize(strength_payload.len() as u8))];
-    strength_s.extend_from_slice(&strength_payload);
-    let mut confidence_s = vec![item_byte(Tag::SymbolSize(confidence_payload.len() as u8))];
-    confidence_s.extend_from_slice(&confidence_payload);
-    let mut out = Vec::new();
-    out.push(item_byte(Tag::Arity(2)));
-    out.extend_from_slice(&strength_s);
-    out.extend_from_slice(&confidence_s);
-    out
-}
-
-fn pool_and_stv(left: &[u8], right: &[u8]) -> Option<Vec<u8>> {
-    let (s1, c1) = pool_stv_parts(left)?;
-    let (s2, c2) = pool_stv_parts(right)?;
-    Some(pool_stv_bytes(s1 * s2, pln_and_confidence(s1, c1, s2, c2)))
-}
-
-fn pool_collect_evidence(bytes: &[u8], out: &mut Vec<Vec<u8>>) {
-    if pool_is_symbol(bytes, "pnil") {
-        return;
-    }
-    if let Tag::Arity(_) = byte_item(bytes[0]) {
-        let args = pool_expr_args(bytes);
-        if args.len() == 3 && pool_is_symbol(args[0], "pcons") {
-            pool_collect_evidence(args[1], out);
-            pool_collect_evidence(args[2], out);
-            return;
-        }
-    }
-    if !out.iter().any(|item| item == bytes) {
-        out.push(bytes.to_vec());
-    }
-}
-
-fn pool_evidence_items(bytes: &[u8]) -> Vec<Vec<u8>> {
-    let mut out = Vec::new();
-    pool_collect_evidence(bytes, &mut out);
-    out
-}
-
-fn pool_evidence_list(items: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = pool_symbol_bytes("pnil");
-    for item in items.iter().rev() {
-        let mut next = Vec::new();
-        pool_push_expr(&mut next, "pcons", &[item, &out]);
-        out = next;
-    }
-    out
-}
-
-fn pool_evidence_union(left: &[u8], right: &[u8]) -> Vec<u8> {
-    let mut items = pool_evidence_items(left);
-    for item in pool_evidence_items(right) {
-        if !items.contains(&item) {
-            items.push(item);
-        }
-    }
-    pool_evidence_list(&items)
-}
-
-fn pool_evidence_overlaps(left: &[u8], right: &[u8]) -> bool {
-    let left = pool_evidence_items(left);
-    pool_evidence_items(right)
-        .iter()
-        .any(|item| left.contains(item))
-}
-
-#[derive(Clone)]
-struct PoolProjection {
-    source: Vec<u8>,
-    source_stv: Vec<u8>,
-    arity: usize,
-    idx: Vec<u8>,
-    marginal_stv: Vec<u8>,
-}
-
-fn pool_and_arity(source: &[u8]) -> Option<usize> {
-    let scoped = pool_expr_args(source);
-    if scoped.len() != 2 {
-        return None;
-    }
-    let ty = pool_expr_args(scoped[1]);
-    if ty.len() >= 2 && pool_is_symbol(ty[0], "And") {
-        Some(ty.len() - 1)
-    } else {
-        None
-    }
-}
-
-fn pool_projection_idx(proj_id: &[u8]) -> Option<&[u8]> {
-    let args = pool_expr_args(proj_id);
-    if args.len() >= 3 && pool_is_symbol(args[0], "marginal-proj") {
-        Some(args[1])
-    } else {
-        None
-    }
-}
-
-fn pool_projection_info(evset: &[u8], prem_stv: &[u8]) -> Option<PoolProjection> {
-    let evidence = pool_evidence_items(evset);
-    for item in &evidence {
-        let args = pool_expr_args(&item);
-        if args.len() == 5 && pool_is_symbol(args[0], "projection-ev") {
-            let Some(idx) = pool_projection_idx(args[1]) else {
-                continue;
-            };
-            let Some(arity) = pool_and_arity(args[2]) else {
-                continue;
-            };
-            // A revised fact can contain both a projection proof and an
-            // independent direct/derived proof. In that case its canonical TV
-            // already represents the revision and must be folded as an
-            // independent part. Only a projection whose fact evidence all
-            // points back to the same compound source may participate in the
-            // correlation pool.
-            let has_independent_fact = evidence.iter().any(|evidence_item| {
-                let evidence_args = pool_expr_args(evidence_item);
-                evidence_args.len() == 3
-                    && pool_is_symbol(evidence_args[0], "fact-ev")
-                    && evidence_args[2] != args[2]
-            });
-            if has_independent_fact {
-                return None;
-            }
-            let marginal_stv = if let Some((s, c)) = pool_stv_parts(args[3]) {
-                pool_stv_bytes(s, pln_marginal_proj_confidence(s, c))
-            } else {
-                prem_stv.to_vec()
-            };
-            return Some(PoolProjection {
-                source: args[2].to_vec(),
-                source_stv: args[3].to_vec(),
-                arity,
-                idx: idx.to_vec(),
-                marginal_stv,
-            });
-        }
-    }
-    None
-}
-
-#[derive(Clone)]
-enum PoolPart {
-    Indep {
-        tv: Vec<u8>,
-    },
-    Pool {
-        source: Vec<u8>,
-        source_stv: Vec<u8>,
-        arity: usize,
-        idxs: Vec<Vec<u8>>,
-        marginal_stv: Vec<u8>,
-    },
-}
-
-fn pool_idx_list(idxs: &[Vec<u8>]) -> Vec<u8> {
-    pool_evidence_list(idxs)
-}
-
-fn pool_parse_idx_list(bytes: &[u8]) -> Vec<Vec<u8>> {
-    pool_evidence_items(bytes)
-}
-
-fn pool_part_tv(part: &PoolPart) -> &[u8] {
-    match part {
-        PoolPart::Indep { tv } => tv,
-        PoolPart::Pool {
-            source_stv,
-            arity,
-            idxs,
-            marginal_stv,
-            ..
-        } => {
-            if idxs.len() == *arity {
-                source_stv
-            } else {
-                marginal_stv
-            }
-        }
-    }
-}
-
-fn pool_parts_tv(parts: &[PoolPart]) -> Option<Vec<u8>> {
-    let mut iter = parts.iter();
-    let first = iter.next()?;
-    let mut acc = pool_part_tv(first).to_vec();
-    for part in iter {
-        acc = pool_and_stv(&acc, pool_part_tv(part))?;
-    }
-    Some(acc)
-}
-
-fn pool_parts_bytes(parts: &[PoolPart]) -> Vec<u8> {
-    let mut out = pool_symbol_bytes("pnil");
-    for part in parts.iter().rev() {
-        let mut part_bytes = Vec::new();
-        match part {
-            PoolPart::Indep { tv } => {
-                pool_push_expr(&mut part_bytes, "indep-part", &[tv]);
-            }
-            PoolPart::Pool {
-                source,
-                source_stv,
-                arity,
-                idxs,
-                marginal_stv,
-            } => {
-                let arity_s = pool_symbol_bytes(&arity.to_string());
-                let idxs_b = pool_idx_list(idxs);
-                pool_push_expr(
-                    &mut part_bytes,
-                    "pool-part",
-                    &[source, source_stv, &arity_s, &idxs_b, marginal_stv],
-                );
-            }
-        }
-        let mut next = Vec::new();
-        pool_push_expr(&mut next, "pcons", &[&part_bytes, &out]);
-        out = next;
-    }
-    out
-}
-
-fn pool_parse_parts(bytes: &[u8]) -> Option<Vec<PoolPart>> {
-    if pool_is_symbol(bytes, "pnil") {
-        return Some(Vec::new());
-    }
-    let args = pool_expr_args(bytes);
-    if args.len() != 3 || !pool_is_symbol(args[0], "pcons") {
-        return None;
-    }
-    let head = pool_expr_args(args[1]);
-    let mut rest = pool_parse_parts(args[2])?;
-    let part = if head.len() == 2 && pool_is_symbol(head[0], "indep-part") {
-        PoolPart::Indep {
-            tv: head[1].to_vec(),
-        }
-    } else if head.len() == 6 && pool_is_symbol(head[0], "pool-part") {
-        PoolPart::Pool {
-            source: head[1].to_vec(),
-            source_stv: head[2].to_vec(),
-            arity: pool_symbol_str(head[3])?.parse::<usize>().ok()?,
-            idxs: pool_parse_idx_list(head[4]),
-            marginal_stv: head[5].to_vec(),
-        }
-    } else {
-        return None;
-    };
-    rest.insert(0, part);
-    Some(rest)
-}
-
-fn pool_state_parts_ev(state: &[u8]) -> Option<(Vec<PoolPart>, Vec<u8>)> {
-    if pool_is_symbol(state, "no-stv") {
-        return Some((Vec::new(), pool_symbol_bytes("pnil")));
-    }
-    let args = pool_expr_args(state);
-    if args.len() == 4 && pool_is_symbol(args[0], "and-pool") {
-        Some((pool_parse_parts(args[3])?, args[2].to_vec()))
-    } else {
-        None
-    }
-}
-
-fn pool_state_bytes(tv: &[u8], evset: &[u8], parts: &[PoolPart]) -> Vec<u8> {
-    let parts_b = pool_parts_bytes(parts);
-    let mut state = Vec::new();
-    pool_push_expr(&mut state, "and-pool", &[tv, evset, &parts_b]);
-    let mut out = Vec::new();
-    pool_push_expr(&mut out, "pool-advance", &[&state]);
-    out
-}
-
-fn pool_read_expr_bytes(expr: &mut ExprSource, out: &mut Vec<u8>) -> Result<(), EvalError> {
-    match expr.read() {
-        SourceItem::Tag(Tag::Arity(arity)) => {
-            out.push(item_byte(Tag::Arity(arity)));
-            for _ in 0..arity {
-                pool_read_expr_bytes(expr, out)?;
-            }
-        }
-        SourceItem::Tag(Tag::NewVar) => out.push(item_byte(Tag::NewVar)),
-        SourceItem::Tag(Tag::VarRef(idx)) => out.push(item_byte(Tag::VarRef(idx))),
-        SourceItem::Tag(Tag::SymbolSize(_)) => {
-            return Err(EvalError::from("unexpected symbol-size tag"));
-        }
-        SourceItem::Symbol(symbol) => {
-            out.push(item_byte(Tag::SymbolSize(symbol.len() as u8)));
-            out.extend_from_slice(symbol);
-        }
-    }
-    Ok(())
-}
-
-fn pool_consume_expr_bytes(expr: &mut ExprSource) -> Result<Vec<u8>, EvalError> {
-    let mut out = Vec::new();
-    pool_read_expr_bytes(expr, &mut out)?;
-    Ok(out)
-}
-
-pub extern "C" fn pln_and_pool_acc(
-    expr: *mut ExprSource,
-    sink: *mut ExprSink,
-) -> Result<(), EvalError> {
-    let expr = unsafe { &mut *expr };
-    let sink = unsafe { &mut *sink };
-    let items = expr.consume_head_check(b"pln_and_pool_acc")?;
-    let (state, prem_stv, prem_evset) = if items == 1 {
-        let input = pool_consume_expr_bytes(expr)?;
-        let args = pool_expr_args(&input);
-        if args.len() != 4 || !pool_is_symbol(args[0], "pool-input") {
-            return Err(EvalError::from(
-                "pln_and_pool_acc takes (pool-input state stv evset)",
-            ));
-        }
-        (args[1].to_vec(), args[2].to_vec(), args[3].to_vec())
-    } else if items == 3 {
-        (
-            pool_consume_expr_bytes(expr)?,
-            pool_consume_expr_bytes(expr)?,
-            pool_consume_expr_bytes(expr)?,
-        )
-    } else {
-        return Err(EvalError::from(
-            "pln_and_pool_acc takes one pool-input or three arguments",
-        ));
-    };
-    let state = state.as_slice();
-    let prem_stv = prem_stv.as_slice();
-    let prem_evset = prem_evset.as_slice();
-
-    let Some((mut parts, old_evset)) = pool_state_parts_ev(state) else {
-        sink.extend_from_slice(&pool_symbol_bytes("pool-blocked"))?;
-        return Ok(());
-    };
-    let projection = pool_projection_info(prem_evset, prem_stv);
-    let overlap = pool_evidence_overlaps(&old_evset, prem_evset);
-
-    match projection {
-        Some(proj) => {
-            if let Some(part) = parts.iter_mut().find(
-                |part| matches!(part, PoolPart::Pool { source, .. } if *source == proj.source),
-            ) {
-                if let PoolPart::Pool { idxs, .. } = part {
-                    if !idxs.contains(&proj.idx) {
-                        idxs.push(proj.idx);
-                    }
-                }
-            } else if overlap {
-                sink.extend_from_slice(&pool_symbol_bytes("pool-blocked"))?;
-                return Ok(());
-            } else {
-                parts.push(PoolPart::Pool {
-                    source: proj.source,
-                    source_stv: proj.source_stv,
-                    arity: proj.arity,
-                    idxs: vec![proj.idx],
-                    marginal_stv: proj.marginal_stv,
-                });
-            }
-        }
-        None => {
-            if overlap {
-                sink.extend_from_slice(&pool_symbol_bytes("pool-blocked"))?;
-                return Ok(());
-            }
-            parts.push(PoolPart::Indep {
-                tv: prem_stv.to_vec(),
-            });
-        }
-    }
-
-    let Some(next_tv) = pool_parts_tv(&parts) else {
-        sink.extend_from_slice(&pool_symbol_bytes("pool-blocked"))?;
-        return Ok(());
-    };
-    let next_evset = pool_evidence_union(&old_evset, prem_evset);
-    sink.extend_from_slice(&pool_state_bytes(&next_tv, &next_evset, &parts))?;
-    Ok(())
-}
 
 op!(num unary f32_as_i8(x: f32) => x as i8);
 op!(num unary f32_as_i16(x: f32) => x as i16);
@@ -1495,7 +693,7 @@ op!(num nulary neginf_f32() => f32::NEG_INFINITY);
 op!(num nulary e_f32() => std::f32::consts::E);
 op!(num nulary pi_f32() => std::f32::consts::PI);
 op!(num nulary tau_f32() => std::f32::consts::TAU);
-op!(num nulary phi_f32() => 1.618034_f32);
+op!(num nulary phi_f32() => std::f32::consts::GOLDEN_RATIO);
 op!(num unary to_radians_f32(x: f32) => x.to_radians());
 op!(num unary to_degrees_f32(x: f32) => x.to_degrees());
 op!(num unary sin_f32(x: f32) => x.sin());
@@ -1551,18 +749,12 @@ pub extern "C" fn encode_hex(expr: *mut ExprSource, sink: *mut ExprSink) -> Resu
     let expr = unsafe { &mut *expr };
     let sink = unsafe { &mut *sink };
     let items = expr.consume_head_check(b"encode_hex")?;
-    if items != 1 {
-        return Err(EvalError::from("only takes one argument"));
-    }
-    let SourceItem::Symbol(symbol) = expr.read() else {
-        return Err(EvalError::from("only parses symbols"));
-    };
+    if items != 1 { return Err(EvalError::from("only takes one argument")) }
+    let SourceItem::Symbol(symbol) = expr.read() else { return Err(EvalError::from("only parses symbols")) };
     let mut buf = [0u8; 64];
-    hex::encode_to_slice(symbol, &mut buf[..2 * symbol.len()]).map_err(|e| {
-        println!("{:?}", e);
-        EvalError::from(concat!("string not a valid type in ", "encode_hex"))
-    })?;
-    sink.write(SourceItem::Symbol(&buf[..2 * symbol.len()]))?;
+    hex::encode_to_slice(symbol, &mut buf[..2*symbol.len()])
+        .map_err(|e| { println!("{:?}", e); EvalError::from(concat!("string not a valid type in ", "encode_hex"))})?;
+    sink.write(SourceItem::Symbol(&buf[..2*symbol.len()]))?;
     Ok(())
 }
 
@@ -1570,12 +762,8 @@ pub extern "C" fn decode_hex(expr: *mut ExprSource, sink: *mut ExprSink) -> Resu
     let expr = unsafe { &mut *expr };
     let sink = unsafe { &mut *sink };
     let items = expr.consume_head_check(b"decode_hex")?;
-    if items != 1 {
-        return Err(EvalError::from("only takes one argument"));
-    }
-    let SourceItem::Symbol(symbol) = expr.read() else {
-        return Err(EvalError::from("only parses symbols"));
-    };
+    if items != 1 { return Err(EvalError::from("only takes one argument")) }
+    let SourceItem::Symbol(symbol) = expr.read() else { return Err(EvalError::from("only parses symbols")) };
     let mut buf = [0u8; 64];
     hex::decode_to_slice(symbol, &mut buf[..symbol.len().div_ceil(2)])
         .map_err(|_| EvalError::from(concat!("string not a valid type in ", "decode_hex")))?;
@@ -1583,43 +771,27 @@ pub extern "C" fn decode_hex(expr: *mut ExprSource, sink: *mut ExprSink) -> Resu
     Ok(())
 }
 
-pub extern "C" fn decode_base64url(
-    expr: *mut ExprSource,
-    sink: *mut ExprSink,
-) -> Result<(), EvalError> {
+pub extern "C" fn decode_base64url(expr: *mut ExprSource, sink: *mut ExprSink) -> Result<(), EvalError> {
     let expr = unsafe { &mut *expr };
     let sink = unsafe { &mut *sink };
     let items = expr.consume_head_check(b"decode_base64url")?;
-    if items != 1 {
-        return Err(EvalError::from("only takes one argument"));
-    }
-    let SourceItem::Symbol(symbol) = expr.read() else {
-        return Err(EvalError::from("only parses symbols"));
-    };
+    if items != 1 { return Err(EvalError::from("only takes one argument")) }
+    let SourceItem::Symbol(symbol) = expr.read() else { return Err(EvalError::from("only parses symbols")) };
     let mut buf = [0u8; 64];
-    let written = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode_slice_unchecked(symbol, &mut buf[..])
+    let written = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode_slice_unchecked(symbol, &mut buf[..])
         .map_err(|_| EvalError::from(concat!("string not a valid type in ", "decode_base64url")))?;
     sink.write(SourceItem::Symbol(&buf[..written]))?;
     Ok(())
 }
 
-pub extern "C" fn encode_base64url(
-    expr: *mut ExprSource,
-    sink: *mut ExprSink,
-) -> Result<(), EvalError> {
+pub extern "C" fn encode_base64url(expr: *mut ExprSource, sink: *mut ExprSink) -> Result<(), EvalError> {
     let expr = unsafe { &mut *expr };
     let sink = unsafe { &mut *sink };
     let items = expr.consume_head_check(b"encode_base64url")?;
-    if items != 1 {
-        return Err(EvalError::from("only takes one argument"));
-    }
-    let SourceItem::Symbol(symbol) = expr.read() else {
-        return Err(EvalError::from("only parses symbols"));
-    };
+    if items != 1 { return Err(EvalError::from("only takes one argument")) }
+    let SourceItem::Symbol(symbol) = expr.read() else { return Err(EvalError::from("only parses symbols")) };
     let mut buf = [0u8; 64];
-    let written = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode_slice(symbol, &mut buf[..])
+    let written = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode_slice(symbol, &mut buf[..])
         .map_err(|_| EvalError::from(concat!("string not a valid type in ", "encode_base64url")))?;
     sink.write(SourceItem::Symbol(&buf[..written]))?;
     Ok(())
@@ -1629,9 +801,7 @@ pub extern "C" fn hash_expr(expr: *mut ExprSource, sink: *mut ExprSink) -> Resul
     let expr = unsafe { &mut *expr };
     let sink = unsafe { &mut *sink };
     let items = expr.consume_head_check(b"hash_expr")?;
-    if items != 1 {
-        return Err(EvalError::from("only takes one argument"));
-    }
+    if items != 1 { return Err(EvalError::from("only takes one argument")) }
     let e: mork_expr::Expr = expr.consume()?;
     let h = e.hash();
     let buf = h.to_le_bytes();
@@ -1639,19 +809,12 @@ pub extern "C" fn hash_expr(expr: *mut ExprSource, sink: *mut ExprSink) -> Resul
     Ok(())
 }
 
-pub extern "C" fn reverse_symbol(
-    expr: *mut ExprSource,
-    sink: *mut ExprSink,
-) -> Result<(), EvalError> {
+pub extern "C" fn reverse_symbol(expr: *mut ExprSource, sink: *mut ExprSink) -> Result<(), EvalError> {
     let expr = unsafe { &mut *expr };
     let sink = unsafe { &mut *sink };
     let items = expr.consume_head_check(b"reverse_symbol")?;
-    if items != 1 {
-        return Err(EvalError::from("only takes one argument"));
-    }
-    let SourceItem::Symbol(symbol) = expr.read() else {
-        return Err(EvalError::from("only reverses symbols"));
-    };
+    if items != 1 { return Err(EvalError::from("only takes one argument")) }
+    let SourceItem::Symbol(symbol) = expr.read() else { return Err(EvalError::from("only reverses symbols")) };
     let mut buf = [0u8; 64];
     buf[..symbol.len()].clone_from_slice(symbol);
     buf[..symbol.len()].reverse();
@@ -1659,59 +822,35 @@ pub extern "C" fn reverse_symbol(
     Ok(())
 }
 
-pub extern "C" fn collapse_symbol(
-    expr: *mut ExprSource,
-    sink: *mut ExprSink,
-) -> Result<(), EvalError> {
+pub extern "C" fn collapse_symbol(expr: *mut ExprSource, sink: *mut ExprSink) -> Result<(), EvalError> {
     let expr = unsafe { &mut *expr };
     let sink = unsafe { &mut *sink };
     let items = expr.consume_head_check(b"collapse_symbol")?;
-    if items != 1 {
-        return Err(EvalError::from(
-            "only takes one argument (an expression of symbols)",
-        ));
-    }
+    if items != 1 { return Err(EvalError::from("only takes one argument (an expression of symbols)")) }
     let si = expr.read();
-    if let SourceItem::Symbol(s) = si {
-        println!("si {:?}", s);
-    }
-    let SourceItem::Tag(Tag::Arity(a)) = si else {
-        return Err(EvalError::from("argument should be an expression"));
-    };
+    if let SourceItem::Symbol(s) = si { println!("si {:?}", s); }
+    let SourceItem::Tag(Tag::Arity(a)) = si else { return Err(EvalError::from("argument should be an expression")) };
     let mut buf = [0u8; 64];
     let mut i = 0;
     for _ in 0..a {
-        let SourceItem::Symbol(symbol) = expr.read() else {
-            return Err(EvalError::from("can only concat symbols in collapse"));
-        };
-        if i + symbol.len() >= 64 {
-            return Err(EvalError::from(
-                "new symbol can not be larger than 63 bytes",
-            ));
-        }
-        buf[i..i + symbol.len()].clone_from_slice(symbol);
+        let SourceItem::Symbol(symbol) = expr.read() else { return Err(EvalError::from("can only concat symbols in collapse")) };
+        if i + symbol.len() >= 64 { return Err(EvalError::from("new symbol can not be larger than 63 bytes")) }
+        buf[i..i+symbol.len()].clone_from_slice(symbol);
         i += symbol.len();
     }
     sink.write(SourceItem::Symbol(&buf[..i]))?;
     Ok(())
 }
 
-pub extern "C" fn explode_symbol(
-    expr: *mut ExprSource,
-    sink: *mut ExprSink,
-) -> Result<(), EvalError> {
+pub extern "C" fn explode_symbol(expr: *mut ExprSource, sink: *mut ExprSink) -> Result<(), EvalError> {
     let expr = unsafe { &mut *expr };
     let sink = unsafe { &mut *sink };
     let items = expr.consume_head_check(b"explode_symbol")?;
-    if items != 1 {
-        return Err(EvalError::from("only takes one argument (a symbol)"));
-    }
-    let SourceItem::Symbol(symbol) = expr.read() else {
-        return Err(EvalError::from("arguments needs to be a symbol"));
-    };
+    if items != 1 { return Err(EvalError::from("only takes one argument (a symbol)")) }
+    let SourceItem::Symbol(symbol) = expr.read() else { return Err(EvalError::from("arguments needs to be a symbol")) };
     sink.write(SourceItem::Tag(Tag::Arity(symbol.len() as _)))?;
     for i in 0..symbol.len() {
-        sink.write(SourceItem::Symbol(&symbol[i..i + 1]))?;
+        sink.write(SourceItem::Symbol(&symbol[i..i+1]))?;
     }
     Ok(())
 }
@@ -1730,33 +869,23 @@ pub extern "C" fn explode_symbol(
 
 // (ifnz <symbol> then <nonzero expr>)
 // (ifnz <symbol> then <nonzero expr> else <zero expr>)
-// The condition <symbol> may be of any length (<symbol> is always len >= 1),
+// The condition <symbol> may be of any length (<symbol> is always len >= 1), 
 //   but all bytes in the <symbol> must be b'\0' in order for the condition to be considered `false`
 pub extern "C" fn ifnz(expr: *mut ExprSource, sink: *mut ExprSink) -> Result<(), EvalError> {
     let expr = unsafe { &mut *expr };
     let sink = unsafe { &mut *sink };
     let items = expr.consume_head_check(b"ifnz")?;
-    if items != 3 && items != 5 {
-        return Err(EvalError::from(
-            "shaped either (ifnz <symbol> then <nonzero expr>) or (ifnz <symbol> then <nonzero expr> else <zero expr>)",
-        ));
-    }
-    let SourceItem::Symbol(symbol) = expr.read() else {
-        return Err(EvalError::from("condition needs to be a symbol"));
-    };
+    if items != 3 && items != 5 { return Err(EvalError::from("shaped either (ifnz <symbol> then <nonzero expr>) or (ifnz <symbol> then <nonzero expr> else <zero expr>)")) }
+    let SourceItem::Symbol(symbol) = expr.read() else { return Err(EvalError::from("condition needs to be a symbol")) };
     let is_nz = !symbol.iter().all(|x| *x == 0);
-    let SourceItem::Symbol(b"then") = expr.read() else {
-        return Err(EvalError::from("expected then symbol"));
-    };
+    let SourceItem::Symbol(b"then") = expr.read() else { return Err(EvalError::from("expected then symbol")) };
     let t: mork_expr::Expr = expr.consume()?;
     if is_nz {
         sink.extend_from_slice(unsafe { t.span().as_ref().unwrap() })?;
         Ok(())
     } else {
         if items == 5 {
-            let SourceItem::Symbol(b"else") = expr.read() else {
-                return Err(EvalError::from("expected else symbol"));
-            };
+            let SourceItem::Symbol(b"else") = expr.read() else { return Err(EvalError::from("expected else symbol")) };
             let f: mork_expr::Expr = expr.consume()?;
             sink.extend_from_slice(unsafe { f.span().as_ref().unwrap() })?;
             Ok(())
@@ -2105,37 +1234,6 @@ pub fn register(scope: &mut EvalScope) {
     scope.add_func("ne_f64", ne_f64, FuncType::Pure);
     scope.add_func("f64_from_string", f64_from_string, FuncType::Pure);
     scope.add_func("f64_to_string", f64_to_string, FuncType::Pure);
-    #[cfg(feature = "pln")]
-    {
-        scope.add_func(
-            "pln_and_confidence_f64",
-            pln_and_confidence_f64,
-            FuncType::Pure,
-        );
-        scope.add_func(
-            "pln_or_confidence_f64",
-            pln_or_confidence_f64,
-            FuncType::Pure,
-        );
-        scope.add_func("pln_and_pool_acc", pln_and_pool_acc, FuncType::Pure);
-        scope.add_func(
-            "pln_mp_confidence_f64",
-            pln_mp_confidence_f64,
-            FuncType::Pure,
-        );
-        scope.add_func("pln_mp_stv", pln_mp_stv, FuncType::Pure);
-        scope.add_func("pln_inv_strength_f64", pln_inv_strength_f64, FuncType::Pure);
-        scope.add_func(
-            "pln_inv_confidence_f64",
-            pln_inv_confidence_f64,
-            FuncType::Pure,
-        );
-        scope.add_func(
-            "pln_inversion_valid_f64",
-            pln_inversion_valid_f64,
-            FuncType::Pure,
-        );
-    }
 
     scope.add_func("f32_as_i8", f32_as_i8, FuncType::Pure);
     scope.add_func("f32_as_i16", f32_as_i16, FuncType::Pure);

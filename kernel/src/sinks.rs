@@ -1,6 +1,4 @@
-use crate::space::{
-    ACT_PATH, fused_rule_candidates, fused_rule_rows, fused_rule_unifications,
-};
+use crate::space::ACT_PATH;
 use crate::{expr, pure};
 use core::f64;
 use eval::EvalScope;
@@ -9,8 +7,8 @@ use futures::StreamExt;
 use log::*;
 use mork_expr::macros::SerializableExpr;
 use mork_expr::{
-    binary_f64_symbol, tagged_binary_f64, Expr, ExprEnv, ExprZipper, ExtractFailure, Tag,
-    UnificationFailure, apply, byte_item, destruct, item_byte, parse, serialize, traverseh, unify,
+    Expr, ExprEnv, ExprZipper, ExtractFailure, Tag, UnificationFailure, apply, byte_item, destruct,
+    item_byte, parse, serialize, traverseh, unify,
 };
 use mork_frontend::bytestring_parser::{Context, Parser, ParserError};
 use mork_frontend::json_parser::Transcriber;
@@ -38,6 +36,10 @@ use std::sync::LazyLock;
 use std::task::Poll;
 use std::time::Instant;
 use std::{mem, process, ptr};
+
+static mut FUSED_RULE_CANDIDATES: usize = 0;
+static mut FUSED_RULE_UNIFICATIONS: usize = 0;
+static mut FUSED_RULE_ROWS: usize = 0;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SinkTiming {
@@ -870,6 +872,30 @@ fn stv_parts(stv: &[u8]) -> (f64, f64) {
 
 fn stv_f64(symbol: &[u8], field: &str) -> f64 {
     try_f64_symbol(symbol).unwrap_or_else(|| panic!("{field} must be textual or binary f64"))
+}
+
+const BINARY_F64_MARKER: u8 = 0xff;
+
+fn binary_f64_symbol(value: f64) -> Vec<u8> {
+    let raw = value.to_be_bytes();
+    let ambiguous_text = std::str::from_utf8(&raw).is_ok()
+        && (raw.iter().all(|byte| !byte.is_ascii_control())
+            || (raw.first() == Some(&b'"') && raw.last() == Some(&b'"')));
+    if ambiguous_text {
+        let mut out = Vec::with_capacity(9);
+        out.push(BINARY_F64_MARKER);
+        out.extend_from_slice(&raw);
+        out
+    } else {
+        raw.to_vec()
+    }
+}
+
+fn tagged_binary_f64(bytes: &[u8]) -> Option<f64> {
+    if bytes.len() != 9 || bytes[0] != BINARY_F64_MARKER {
+        return None;
+    }
+    Some(f64::from_be_bytes(bytes[1..].try_into().ok()?))
 }
 
 fn try_f64_symbol(symbol: &[u8]) -> Option<f64> {
@@ -3842,7 +3868,7 @@ impl Sink for ScheduleRulesSink {
                     ptr: path.as_ptr().cast_mut(),
                 };
                 unsafe {
-                    fused_rule_candidates += 1;
+                    FUSED_RULE_CANDIDATES += 1;
                 }
                 rule.clear();
                 ExprEnv::new(0, rule_expr).args(&mut rule);
@@ -3860,7 +3886,7 @@ impl Sink for ScheduleRulesSink {
                 pairs.clear();
                 pairs.push((rule[1], ExprEnv::new(1, goal_expr)));
                 unsafe {
-                    fused_rule_unifications += 1;
+                    FUSED_RULE_UNIFICATIONS += 1;
                 }
                 let Ok(bindings) = unify(&mut pairs) else {
                     continue;
@@ -3930,7 +3956,7 @@ impl Sink for ScheduleRulesSink {
                 pending.extend_from_slice(instantiated[2]);
                 pending.extend_from_slice(&pnil);
                 unsafe {
-                    fused_rule_rows += 1;
+                    FUSED_RULE_ROWS += 1;
                 }
                 add.insert(&pending, ());
                 matched = true;

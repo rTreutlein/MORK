@@ -2817,83 +2817,6 @@ fn sink_float_reduce() {
 (prod 103014739461697900000000000000000)\n")
 }
 
-fn sink_float_reduce_guarded() {
-    let mut s = Space::new();
-
-    const SPACE_EXPRS: &str = r#"
-(exec 0
-    (, (n $x $id))
-    (O (fsum (sum $c) $c $x $id)))
-
-(n 1.0 left)
-(n 1.0 right)
-    "#;
-
-    s.add_all_sexpr(SPACE_EXPRS.as_bytes()).unwrap();
-    s.metta_calculus(100);
-
-    let mut v = vec![];
-    s.dump_sexpr(expr!(s, "[2] sum $"), expr!(s, "_1"), &mut v);
-    let res = String::from_utf8_lossy_owned(v);
-
-    assert_eq!(res, "2\n")
-}
-
-fn sink_dist_average() {
-    let mut s = Space::new();
-
-    const SPACE_EXPRS: &str = r#"
-(exec 0
-    (, (avg-source $src $x $w))
-    (O (dist-average out $src $x $w)))
-
-(avg-source a 150.0 0.5)
-(avg-source a 170.0 0.5)
-(avg-source b 160.0 1.0)
-    "#;
-
-    s.add_all_sexpr(SPACE_EXPRS.as_bytes()).unwrap();
-    s.metta_calculus(100);
-
-    let mut v = vec![];
-    s.dump_sexpr(
-        expr!(s, "[4] dist-pair out $ $"),
-        expr!(s, "[2] _1 _2"),
-        &mut v,
-    );
-    let res = String::from_utf8_lossy_owned(v);
-
-    assert_eq!(res, "(155 0.5)\n(165 0.5)\n")
-}
-
-fn sink_dist_sum() {
-    let mut s = Space::new();
-
-    const SPACE_EXPRS: &str = r#"
-(exec 0
-    (, (count-source $src $x $w))
-    (O (dist-sum out $src $x $w)))
-
-(count-source a 0.0 0.5)
-(count-source a 1.0 0.5)
-(count-source b 0.0 0.5)
-(count-source b 1.0 0.5)
-    "#;
-
-    s.add_all_sexpr(SPACE_EXPRS.as_bytes()).unwrap();
-    s.metta_calculus(100);
-
-    let mut v = vec![];
-    s.dump_sexpr(
-        expr!(s, "[4] dist-pair out $ $"),
-        expr!(s, "[2] _1 _2"),
-        &mut v,
-    );
-    let res = String::from_utf8_lossy_owned(v);
-
-    assert_eq!(res, "(0 0.25)\n(1 0.5)\n(2 0.25)\n")
-}
-
 fn sink_count() {
     let mut s = Space::new();
 
@@ -6306,9 +6229,6 @@ fn main() {
             sink_hash_expr();
             sink_even_half();
             sink_float_reduce();
-            sink_float_reduce_guarded();
-            sink_dist_average();
-            sink_dist_sum();
 
             parse_csv();
             parse_json();

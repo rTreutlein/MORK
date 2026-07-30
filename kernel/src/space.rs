@@ -14,7 +14,7 @@ use std::task::Poll;
 use std::time::Instant;
 use futures::StreamExt;
 use pathmap::ring::{AlgebraicStatus, Lattice};
-use mork_expr::{byte_item, tagged_binary_f64, Expr, ExprZipper, ExtractFailure, item_byte, parse, serialize, Tag, traverseh, ExprEnv, unify, UnificationFailure, apply, destruct, OwnedSourceItem};
+use mork_expr::{byte_item, Expr, ExprZipper, ExtractFailure, item_byte, parse, serialize, Tag, traverseh, ExprEnv, unify, UnificationFailure, apply, destruct, OwnedSourceItem};
 use mork_frontend::bytestring_parser::{Parser, ParserError, Context};
 use mork_interning::{WritePermit, SharedMapping, SharedMappingHandle};
 use pathmap::utils::{BitMask, ByteMask};
@@ -25,42 +25,12 @@ use mork_frontend::json_parser::Transcriber;
 use log::*;
 use subprocess::{Popen, PopenConfig, Redirection};
 use subprocess::unix::PopenExt;
-use crate::sinks::{SinkProfileSpan, WriteResource, WriteResourceRequest};
+use crate::sinks::{WriteResource, WriteResourceRequest};
 use crate::sources::{AFactor, Resource, ResourceRequest};
 
 pub static mut transitions: usize = 0;
 pub static mut unifications: usize = 0;
 pub static mut writes: usize = 0;
-pub static mut fused_rule_candidates: usize = 0;
-pub static mut fused_rule_unifications: usize = 0;
-pub static mut fused_rule_rows: usize = 0;
-pub static mut head_source_candidates: usize = 0;
-pub static mut head_source_rows: usize = 0;
-
-#[cfg(not(feature = "interning"))]
-fn write_printable_symbol<W: Write>(out: &mut W, symbol: &[u8]) {
-    if let Some(value) = tagged_binary_f64(symbol) {
-        let value = if value == 0.0 { 0.0 } else { value };
-        let _ = write!(out, "{value:?}");
-        return;
-    }
-    let textual = std::str::from_utf8(symbol).is_ok()
-        && (symbol.iter().all(|byte| !byte.is_ascii_control())
-            || (symbol.first() == Some(&b'"') && symbol.last() == Some(&b'"')));
-    if textual {
-        let _ = out.write_all(symbol);
-    } else if let Ok(raw) = <&[u8; 8]>::try_from(symbol) {
-        let value = f64::from_be_bytes(*raw);
-        if value.is_finite() {
-            let value = if value == 0.0 { 0.0 } else { value };
-            let _ = write!(out, "{value:?}");
-            return;
-        }
-        for byte in symbol { let _ = write!(out, "\\x{byte:02x}"); }
-    } else {
-        for byte in symbol { let _ = write!(out, "\\x{byte:02x}"); }
-    }
-}
 
 pub static ACT_PATH: &'static str = "/dev/shm/";
 // pub static ACT_PATH: &'static str = "/mnt/data/";
@@ -930,22 +900,17 @@ impl Space {
         let mut i = 0usize;
         while rz.to_next_val() {
             // println!("{}", serialize(rz.path()));
-            let expr = Expr { ptr: rz.path().as_ptr().cast_mut() };
-            #[cfg(feature = "interning")]
-            expr
-            .serialize2(
-                w,
-                |s| {
+            Expr{ ptr: rz.path().as_ptr().cast_mut() }.serialize2(w, |s| {
+                #[cfg(feature="interning")]
+                {
                     let symbol = i64::from_be_bytes(s.try_into().unwrap()).to_be_bytes();
                     let mstr = self.sm.get_bytes(symbol).map(unsafe { |x| std::str::from_utf8_unchecked(x) });
-                    unsafe {
-                        std::mem::transmute(mstr.expect(format!("failed to look up {:?}", symbol).as_str()))
-                    }
-                },
-                |i, intro| Expr::VARNAMES[i as usize],
-            );
-            #[cfg(not(feature = "interning"))]
-            expr.serialize2_write_symbols(w, write_printable_symbol, |i, intro| Expr::VARNAMES[i as usize]);
+                    // println!("symbol {symbol:?}, bytes {mstr:?}");
+                    unsafe { std::mem::transmute(mstr.expect(format!("failed to look up {:?}", symbol).as_str())) }
+                }
+                #[cfg(not(feature="interning"))]
+                unsafe { std::mem::transmute(std::str::from_utf8_unchecked(s)) }
+            }, |i, intro| { Expr::VARNAMES[i as usize] });
             // w.write(serialize(rz.path()).as_bytes());
             w.write(&[b'\n']).map_err(|x| x.to_string())?;
             i += 1;
@@ -984,21 +949,17 @@ impl Space {
             }
 
             // &buffer[constant_template_prefix.len()..oz.loc]
-            let expr = Expr { ptr: buffer.as_ptr().cast_mut() };
-            #[cfg(feature = "interning")]
-            expr.serialize2(
-                w,
-                |s| {
+            Expr{ ptr: buffer.as_ptr().cast_mut() }.serialize2(w, |s| {
+                #[cfg(feature="interning")]
+                {
                     let symbol = i64::from_be_bytes(s.try_into().unwrap()).to_be_bytes();
                     let mstr = self.sm.get_bytes(symbol).map(unsafe { |x| std::str::from_utf8_unchecked(x) });
-                    unsafe {
-                        std::mem::transmute(mstr.expect(format!("failed to look up {:?}", symbol).as_str()))
-                    }
-                },
-                |i, intro| Expr::VARNAMES[i as usize],
-            );
-            #[cfg(not(feature = "interning"))]
-            expr.serialize2_write_symbols(w, write_printable_symbol, |i, intro| Expr::VARNAMES[i as usize]);
+                    // println!("symbol {symbol:?}, bytes {mstr:?}");
+                    unsafe { std::mem::transmute(mstr.expect(format!("failed to look up {:?}", symbol).as_str())) }
+                }
+                #[cfg(not(feature="interning"))]
+                unsafe { std::mem::transmute(std::str::from_utf8_unchecked(s)) }
+            }, |i, intro| { Expr::VARNAMES[i as usize] });
             let mut buffer_slice = &mut buffer[..];
             w.write(&[b'\n']).map_err(|x| x.to_string()).unwrap();
 
@@ -1713,22 +1674,10 @@ impl Space {
 
             #[cfg(feature="specialize_io")]
             let res = match (*pat_expr.ptr.add(2), *tpl_expr.ptr.add(2)) {
-                (b',', b',') => {
-                    let _span = SinkProfileSpan::new("runtime", "multi-multi");
-                    self.transform_multi_multi_(pat_expr, tpl_expr, rt)
-                }
-                (b'I', b',') => {
-                    let _span = SinkProfileSpan::new("runtime", "multi-input");
-                    self.transform_multi_multi_i(pat_expr, tpl_expr, rt)
-                }
-                (b',', b'O') => {
-                    let _span = SinkProfileSpan::new("runtime", "multi-output");
-                    self.transform_multi_multi_o(pat_expr, tpl_expr, rt)
-                }
-                (b'I', b'O') => {
-                    let _span = SinkProfileSpan::new("runtime", "input-output");
-                    self.transform_multi_multi_io(pat_expr, tpl_expr, rt, false, false)
-                }
+                (b',', b',') => { self.transform_multi_multi_(pat_expr, tpl_expr, rt) }
+                (b'I', b',') => { self.transform_multi_multi_i(pat_expr, tpl_expr, rt) }
+                (b',', b'O') => { self.transform_multi_multi_o(pat_expr, tpl_expr, rt) }
+                (b'I', b'O') => { self.transform_multi_multi_io(pat_expr, tpl_expr, rt, false, false) }
                 (_, _) => { return Err("pattern functor can only be , or I and template functor can only be , or O") }
             };
             #[cfg(not(feature="specialize_io"))]
@@ -1750,20 +1699,17 @@ impl Space {
         const PREFIX: [u8; 6] = const { [item_byte(Tag::Arity(4)), item_byte(Tag::SymbolSize(4)), b'e', b'x', b'e', b'c' ] };
 
         while {
-            let select_span = SinkProfileSpan::new("runtime", "select-executor");
             let mut rz = self.btm.read_zipper_at_borrowed_path(&PREFIX[..]);
             if rz.to_next_val() {
                 // cannot be here `rz` conflicts potentially with zippers(rz.path())
                 let mut x: Vec<u8> = rz.into_path(); // should use local buffer
                 self.btm.remove(&x[..]);
-                drop(select_span);
                 let mut xe = Expr{ ptr: x.as_mut_ptr() };
                 let start = Instant::now();
                 if let Err(e) = self.interpret(xe) {
                     debug!(target: "interpret", "not interpreting: {}", e);
                 }
                 if self.timing {
-                    let _timing_span = SinkProfileSpan::new("runtime", "record-timing");
                     let start_string = start.elapsed().as_nanos().to_string();
                     let start_str = start_string.as_str();
                     let done_string = done.to_string();
@@ -1840,28 +1786,5 @@ impl Drop for Space {
             // z3.terminate();
             drop(z3.stdin.take())
         }
-    }
-}
-
-#[cfg(all(test, not(feature = "interning")))]
-mod tests {
-    use super::write_printable_symbol;
-    use mork_expr::binary_f64_symbol;
-
-    #[test]
-    fn tagged_binary_float_serializes_as_decimal_even_when_payload_is_utf8() {
-        let value = f64::from_be_bytes([0x3f, 0xc2, 0xa2, 0xc2, 0xa2, 0xc2, 0xa2, 0x41]);
-        assert!(std::str::from_utf8(&value.to_be_bytes()).is_ok());
-        let mut output = Vec::new();
-        write_printable_symbol(&mut output, &binary_f64_symbol(value));
-        let decoded = std::str::from_utf8(&output).unwrap().parse::<f64>().unwrap();
-        assert_eq!(decoded.to_bits(), value.to_bits());
-    }
-
-    #[test]
-    fn eight_byte_text_symbol_remains_text() {
-        let mut output = Vec::new();
-        write_printable_symbol(&mut output, b"abcdefgh");
-        assert_eq!(output, b"abcdefgh");
     }
 }

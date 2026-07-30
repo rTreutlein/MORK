@@ -97,35 +97,6 @@ pub enum Tag {
     // U64,
 }
 
-/// Marker used inside a symbol payload to distinguish an IEEE-754 `f64` from
-/// arbitrary eight-byte symbol text.  Older runtime values used the raw eight
-/// bytes directly, which is ambiguous whenever those bytes also form UTF-8.
-pub const BINARY_F64_MARKER: u8 = 0xff;
-
-#[inline]
-pub fn binary_f64_symbol(value: f64) -> Vec<u8> {
-    let raw = value.to_be_bytes();
-    let ambiguous_text = std::str::from_utf8(&raw).is_ok()
-        && (raw.iter().all(|byte| !byte.is_ascii_control())
-            || (raw.first() == Some(&b'"') && raw.last() == Some(&b'"')));
-    if ambiguous_text {
-        let mut out = Vec::with_capacity(9);
-        out.push(BINARY_F64_MARKER);
-        out.extend_from_slice(&raw);
-        out
-    } else {
-        raw.to_vec()
-    }
-}
-
-#[inline]
-pub fn tagged_binary_f64(bytes: &[u8]) -> Option<f64> {
-    if bytes.len() != 9 || bytes[0] != BINARY_F64_MARKER {
-        return None;
-    }
-    Some(f64::from_be_bytes(bytes[1..].try_into().ok()?))
-}
-
 // [2] <u64> '8 0 0 0 1 2
 // [2] shortStr '19 a d a ...
 
@@ -931,14 +902,6 @@ impl Expr {
         execute_loop(&mut traversal, *self, 0);
     }
 
-    /// Serialize while allowing symbols to be rendered directly into the
-    /// target, including compact non-UTF8 symbols.
-    #[inline(never)]
-    pub fn serialize2_write_symbols<Target: std::io::Write, F: FnMut(&mut Target, &[u8]), G: Fn(u8, bool) -> &'static str>(&self, t: &mut Target, write_symbol: F, map_variable: G) {
-        let mut traversal = SerializerTraversal2WriteSymbols{ out: t, write_symbol, map_variable, transient: false, n: 0 };
-        execute_loop(&mut traversal, *self, 0);
-    }
-
     #[inline(never)]
     pub fn serialize_highlight<Target : std::io::Write, F : for <'a> Fn(&'a [u8]) -> &'a str, G : Fn(u8, bool) -> &'static str>(&self, t: &mut Target, map_symbol: F, map_variable: G, target: usize) -> () {
         let mut targets = [(target, "\x1B[43m", "\x1B[0m")].repeat(10); // FIXE
@@ -1191,17 +1154,6 @@ impl <Target : std::io::Write, F : for <'b> Fn(&'b [u8]) -> &'b str, G : Fn(u8, 
     #[inline(always)] fn zero(&mut self, offset: usize, a: u8) -> () { if self.transient { self.out.write_all(" ".as_bytes()); }; self.out.write_all("(".as_bytes()); self.transient = false; }
     #[inline(always)] fn add(&mut self, offset: usize, acc: (), sub: ()) -> () { self.transient = true; }
     #[inline(always)] fn finalize(&mut self, offset: usize, acc: ()) -> () { self.out.write_all(")".as_bytes()); }
-}
-
-struct SerializerTraversal2WriteSymbols<'a, Target: std::io::Write, F: FnMut(&mut Target, &[u8]), G: Fn(u8, bool) -> &'static str> { out: &'a mut Target, write_symbol: F, map_variable: G, transient: bool, n: u8 }
-#[allow(unused_variables, unused_must_use)]
-impl<Target: std::io::Write, F: FnMut(&mut Target, &[u8]), G: Fn(u8, bool) -> &'static str> Traversal<(), ()> for SerializerTraversal2WriteSymbols<'_, Target, F, G> {
-    #[inline(always)] fn new_var(&mut self, offset: usize) -> () { if self.transient { self.out.write_all(b" "); }; self.out.write_all((self.map_variable)(self.n, true).as_bytes()); self.n += 1; }
-    #[inline(always)] fn var_ref(&mut self, offset: usize, i: u8) -> () { if self.transient { self.out.write_all(b" "); }; self.out.write_all((self.map_variable)(i, false).as_bytes()); }
-    #[inline(always)] fn symbol(&mut self, offset: usize, s: &[u8]) -> () { if self.transient { self.out.write_all(b" "); }; (self.write_symbol)(self.out, s); }
-    #[inline(always)] fn zero(&mut self, offset: usize, a: u8) -> () { if self.transient { self.out.write_all(b" "); }; self.out.write_all(b"("); self.transient = false; }
-    #[inline(always)] fn add(&mut self, offset: usize, acc: (), sub: ()) -> () { self.transient = true; }
-    #[inline(always)] fn finalize(&mut self, offset: usize, acc: ()) -> () { self.out.write_all(b")"); }
 }
 
 struct SerializerTraversalHighlights<'a, 't, Target : std::io::Write, F : for <'b> Fn(&'b [u8]) -> &'b str, G : Fn(u8, bool) -> &'static str> { out: &'a mut Target, map_symbol: F, map_variable: G, transient: bool, n: u8, targets: &'t [(usize, &'static str, &'static str)] }

@@ -5,8 +5,6 @@
 #![feature(more_float_constants)]
 
 pub mod space;
-#[cfg(feature = "pln")]
-pub mod native;
 mod sources;
 mod sinks;
 mod pure;
@@ -41,77 +39,6 @@ mod tests {
         assert!(output.contains("(tail-picked 3)\n"));
         assert!(output.contains("(tail-picked 4)\n"));
         assert!(!output.contains("(tail-picked 2)\n"));
-    }
-
-    #[test]
-    fn less_than_source_orders_encoded_expressions_and_preserves_bindings() {
-        let mut space = Space::new();
-        space.add_all_sexpr(br#"
-            (settype 1 A)
-            (settype 2 A)
-            (settype 3 A)
-            (settype 4 B)
-            (exec 0
-                (I (< (settype $left $type)
-                      (settype $right $type)))
-                (, (ordered $type $left $right)))
-        "#).unwrap();
-
-        assert_eq!(space.metta_calculus(1), 1);
-
-        let mut output = Vec::new();
-        space.dump_all_sexpr(&mut output).unwrap();
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("(ordered A 1 2)\n"), "{output}");
-        assert!(output.contains("(ordered A 1 3)\n"), "{output}");
-        assert!(output.contains("(ordered A 2 3)\n"), "{output}");
-        assert_eq!(output.matches("(ordered A ").count(), 3, "{output}");
-        assert!(!output.contains("(ordered B "), "{output}");
-    }
-
-    #[test]
-    fn simple_revise_proofs_matches_symbolic_greedy_disjoint_fold() {
-        let mut space = Space::new();
-        space.add_all_sexpr(br#"
-            (open-proof bird tweety p3 stv3)
-            (proof-evidence bird tweety p3 e1)
-            (open-proof bird tweety p2 stv2)
-            (proof-evidence bird tweety p2 e2)
-            (open-proof bird tweety p1 stv1)
-            (proof-evidence bird tweety p1 e1)
-
-            (open-proof bird polly p4 stv4)
-            (proof-evidence bird polly p4 e4)
-
-            (open-proof fish tweety p5 stv5)
-            (proof-evidence fish tweety p5 e5)
-
-            (open-proof empty goal p0 stv0)
-
-            (exec 0
-                (, (open-proof $type $goal $proof $stv))
-                (O (revise-proofs-simple
-                     $type $goal $proof $stv)))
-        "#).unwrap();
-
-        assert_eq!(space.metta_calculus(1), 1);
-
-        let mut output = Vec::new();
-        space.dump_all_sexpr(&mut output).unwrap();
-        let output = String::from_utf8(output).unwrap();
-
-        assert!(!output.contains("(open-proof "), "{output}");
-        assert!(output.contains("(proved bird tweety p1 stv1)\n"), "{output}");
-        assert!(output.contains("(proved bird tweety p2 stv2)\n"), "{output}");
-        assert!(output.contains("(proved bird tweety p3 stv3)\n"), "{output}");
-        assert!(output.contains(
-            "(revised bird tweety (merge stv1 stv2) (merge p1 p2))\n"
-        ), "{output}");
-        assert!(output.contains("(revised-evidence bird tweety e1)\n"), "{output}");
-        assert!(output.contains("(revised-evidence bird tweety e2)\n"), "{output}");
-        assert!(output.contains("(revised bird polly stv4 p4)\n"), "{output}");
-        assert!(output.contains("(revised fish tweety stv5 p5)\n"), "{output}");
-        assert!(output.contains("(revised empty goal stv0 p0)\n"), "{output}");
     }
 
     #[test]
@@ -166,105 +93,5 @@ mod tests {
         assert_eq!(output.matches("(seen a (one two))\n").count(), 1, "{output}");
         assert!(output.contains("(seen b (three four))\n"), "{output}");
         assert!(!output.contains("(seen missing"), "{output}");
-    }
-
-    #[test]
-    fn contribution_sink_replaces_one_identity_and_aggregate() {
-        let mut space = Space::new();
-        space.add_all_sexpr(br#"
-            (fact cache (0.0 0.0))
-            (contribution-state (fact cache) (0.0 0.0))
-            (contribution-value (fact cache) (0.0 0.0))
-            (pending a 0.8 0.5 proof-a)
-            (exec 0
-                (, (pending $id $value $weight $proof)
-                   (contribution-state (fact cache) $state)
-                   (contribution-value (fact cache) $old-stv))
-                (O
-                    (- (pending $id $value $weight $proof))
-                    (update-contribution
-                        (fact cache) $id no-observation
-                        (observation $value $weight $proof)
-                        $state $old-stv $old-stv)))
-        "#).unwrap();
-
-        assert_eq!(space.metta_calculus(2), 1);
-        space.add_all_sexpr(br#"
-            (replacement a 0.6 0.75 proof-b)
-            (exec 0
-                (, (replacement $id $value $weight $proof)
-                   (contribution-state (fact cache) $state)
-                   (contribution-value (fact cache) $old-stv)
-                   (contribution-observation
-                       (fact cache) $id $old-value $old-weight $old-proof))
-                (O
-                    (- (replacement $id $value $weight $proof))
-                    (update-contribution
-                        (fact cache) $id
-                        (observation $old-value $old-weight $old-proof)
-                        (observation $value $weight $proof)
-                        $state $old-stv $old-stv)))
-        "#).unwrap();
-        assert_eq!(space.metta_calculus(2), 1);
-
-        let mut output = Vec::new();
-        space.dump_all_sexpr(&mut output).unwrap();
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("(contribution-observation (fact cache) a 0.6 0.75 proof-b)\n"), "{output}");
-        assert!(!output.contains("proof-a"), "{output}");
-        assert!(output.contains("(fact cache (0.6 "), "{output}");
-        assert_eq!(output.matches("(contribution-state (fact cache)").count(), 1, "{output}");
-        assert_eq!(output.matches("(contribution-value (fact cache)").count(), 1, "{output}");
-    }
-
-    #[test]
-    fn schedule_rules_preserves_variables_shared_with_premises() {
-        let mut space = Space::new();
-        space.add_all_sexpr(br#"
-            (ruleN
-                (Pet $x)
-                pet-rule
-                (ctv (0.9 0.5) (0 1))
-                (pcons (Dog $x) pnil))
-            (, (Goal (Pet $answer)))
-            (fact (Dog fido))
-            (exec 0
-                (, (, (Goal $goal)))
-                (O (schedule-rules $goal)))
-            (exec 1
-                (, (pendingN
-                     $_priority $goal $_stv
-                     (pcons $premise pnil) $_evidence)
-                   (fact $premise))
-                (O (+ (scheduled-goal $goal))))
-        "#).unwrap();
-
-        assert_eq!(space.metta_calculus(2), 2);
-
-        let mut output = Vec::new();
-        space.dump_all_sexpr(&mut output).unwrap();
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("(scheduled-goal (Pet fido))\n"), "{output}");
-    }
-
-    #[test]
-    fn schedule_rules_leaves_goals_for_specialized_rule_fallbacks() {
-        let mut space = Space::new();
-        space.add_all_sexpr(br#"
-            (ruleN (Pet fido) ordinary (ctv (0.9 0.5) (0 1)) pnil)
-            (ruleN (Pet fido) projection (proj and) (pcons (Pets fido) pnil))
-            (, (Goal (Pet fido)))
-            (exec 0
-                (, (, (Goal $goal)))
-                (O (schedule-rules $goal)))
-        "#).unwrap();
-
-        assert_eq!(space.metta_calculus(1), 1);
-
-        let mut output = Vec::new();
-        space.dump_all_sexpr(&mut output).unwrap();
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("(, (Goal (Pet fido)))\n"), "{output}");
-        assert!(output.contains("(pendingN "), "{output}");
     }
 }

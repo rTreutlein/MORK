@@ -5,7 +5,9 @@ use pathmap::zipper::*;
 use mork_expr::{byte_item, destruct, item_byte, serialize, unify, Expr, ExprEnv, Tag};
 use mork_expr::macros::SerializableExpr;
 use std::collections::BTreeSet;
-use crate::space::{head_source_candidates, head_source_rows};
+
+static mut HEAD_SOURCE_CANDIDATES: usize = 0;
+static mut HEAD_SOURCE_ROWS: usize = 0;
 
 pub enum ResourceRequest<'a> {
     BTM(&'a [u8]),
@@ -95,7 +97,7 @@ impl<const HEAD: bool> Source for HeadTailSource<HEAD> {
                     break;
                 };
                 unsafe {
-                    head_source_candidates += 1;
+                    HEAD_SOURCE_CANDIDATES += 1;
                 }
                 selected.insert(relative.to_vec());
                 if HEAD && selected.len() == self.limit {
@@ -114,7 +116,7 @@ impl<const HEAD: bool> Source for HeadTailSource<HEAD> {
 
         let mut output = PathMap::new();
         unsafe {
-            head_source_rows += selected.len();
+            HEAD_SOURCE_ROWS += selected.len();
         }
         for relative in selected {
             let mut path = self.source_prefix.clone();
