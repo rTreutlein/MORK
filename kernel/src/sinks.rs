@@ -1026,6 +1026,49 @@ fn evidence_set(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
     out
 }
 
+struct InlineVec<T: Copy, const N: usize> {
+    inline: [Option<T>; N],
+    inline_len: usize,
+    overflow: Vec<T>,
+}
+
+impl<T: Copy, const N: usize> InlineVec<T, N> {
+    fn new() -> Self {
+        Self {
+            inline: [None; N],
+            inline_len: 0,
+            overflow: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, value: T) {
+        if self.inline_len < N {
+            self.inline[self.inline_len] = Some(value);
+            self.inline_len += 1;
+        } else {
+            self.overflow.push(value);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.inline_len + self.overflow.len()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = T> + '_ {
+        self.inline[..self.inline_len]
+            .iter()
+            .map(|value| value.expect("initialized inline item"))
+            .chain(self.overflow.iter().copied())
+    }
+
+    fn contains(&self, value: &T) -> bool
+    where
+        T: PartialEq,
+    {
+        self.iter().any(|item| item == *value)
+    }
+}
+
 fn is_variable_expr(bytes: &[u8]) -> bool {
     match byte_item(bytes[0]) {
         Tag::NewVar | Tag::VarRef(_) => true,
@@ -1037,7 +1080,7 @@ fn is_variable_expr(bytes: &[u8]) -> bool {
 fn alpha_equiv_inner<'a>(
     left: &'a [u8],
     right: &'a [u8],
-    variables: &mut Vec<(&'a [u8], &'a [u8])>,
+    variables: &mut InlineVec<(&'a [u8], &'a [u8]), 8>,
 ) -> bool {
     match (byte_item(left[0]), byte_item(right[0])) {
         (Tag::Arity(left_arity), Tag::Arity(right_arity)) if left_arity == right_arity => {
@@ -1047,9 +1090,9 @@ fn alpha_equiv_inner<'a>(
         }
         (_, _) if is_variable_expr(left) && is_variable_expr(right) => {
             if let Some((_, mapped)) = variables.iter().find(|(source, _)| *source == left) {
-                return *mapped == right;
+                return mapped == right;
             }
-            if variables.iter().any(|(_, mapped)| *mapped == right) {
+            if variables.iter().any(|(_, mapped)| mapped == right) {
                 return false;
             }
             variables.push((left, right));
@@ -1065,17 +1108,17 @@ fn alpha_equiv_inner<'a>(
 }
 
 fn alpha_equiv(left: &[u8], right: &[u8]) -> bool {
-    alpha_equiv_inner(left, right, &mut Vec::new())
+    alpha_equiv_inner(left, right, &mut InlineVec::new())
 }
 
 fn pattern_instance_inner<'a>(
     pattern: &'a [u8],
     value: &'a [u8],
-    bindings: &mut Vec<(&'a [u8], &'a [u8])>,
+    bindings: &mut InlineVec<(&'a [u8], &'a [u8]), 8>,
 ) -> bool {
     if is_variable_expr(pattern) {
         if let Some((_, bound)) = bindings.iter().find(|(variable, _)| *variable == pattern) {
-            return *bound == value;
+            return bound == value;
         }
         bindings.push((pattern, value));
         return true;
@@ -1094,7 +1137,7 @@ fn pattern_instance_inner<'a>(
 }
 
 fn pattern_instance(pattern: &[u8], value: &[u8]) -> bool {
-    pattern_instance_inner(pattern, value, &mut Vec::new())
+    pattern_instance_inner(pattern, value, &mut InlineVec::new())
 }
 
 fn evidence_contains_rule(evidence: &[u8], rule: &[u8], allow_instance: bool) -> bool {
@@ -1261,8 +1304,8 @@ fn evidence_equal(left: &[u8], right: &[u8]) -> bool {
 }
 
 fn evidence_alpha_equal(left: &[u8], right: &[u8]) -> bool {
-    let mut left_items = Vec::new();
-    let mut right_items = Vec::new();
+    let mut left_items = InlineVec::<&[u8], 8>::new();
+    let mut right_items = InlineVec::<&[u8], 8>::new();
     visit_evidence(left, &mut |item| {
         if !left_items.contains(&item) {
             left_items.push(item);
@@ -1384,29 +1427,39 @@ fn select_current_snapshot_proof_refs(rows: &BTreeSet<ProofRow>) -> Vec<&ProofRo
     selected
 }
 
-#[derive(Clone)]
-struct ProjectionEvidence {
-    source: Vec<u8>,
-    target: Vec<u8>,
+struct ProjectionEvidence<'a> {
+    encoded: &'a [u8],
+    source: &'a [u8],
+    target: &'a [u8],
     marginal: bool,
 }
 
-fn projection_evidence(ev: &[u8]) -> Vec<ProjectionEvidence> {
-    evidence_set(ev)
-        .into_iter()
-        .filter_map(|item| {
-            let args = expr_args(&item);
-            if args.len() != 5 || !is_symbol(args[0], "projection-ev") {
-                return None;
-            }
-            let proj_args = expr_args(args[1]);
-            Some(ProjectionEvidence {
-                source: args[2].to_vec(),
-                target: args[4].to_vec(),
-                marginal: proj_args.len() >= 3 && is_symbol(proj_args[0], "marginal-proj"),
-            })
-        })
-        .collect()
+fn projection_evidence(ev: &[u8]) -> Vec<ProjectionEvidence<'_>> {
+    let mut projections = Vec::new();
+    visit_evidence(ev, &mut |item| {
+        let Some([name, projection, source, _proof, target]) =
+            expr_args_exact::<5>(item)
+        else {
+            return true;
+        };
+        if !is_symbol(name, "projection-ev") {
+            return true;
+        }
+        let marginal = matches!(byte_item(projection[0]), Tag::Arity(arity) if arity >= 3)
+            && expr_args_iter(projection)
+                .next()
+                .is_some_and(|kind| is_symbol(kind, "marginal-proj"));
+        projections.push(ProjectionEvidence {
+            encoded: item,
+            source,
+            target,
+            marginal,
+        });
+        true
+    });
+    projections.sort_unstable_by(|left, right| left.encoded.cmp(right.encoded));
+    projections.dedup_by(|left, right| left.encoded == right.encoded);
+    projections
 }
 
 fn related_projection_choice(
