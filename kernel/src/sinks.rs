@@ -998,19 +998,26 @@ fn revise_stv(old: &[u8], new: &[u8]) -> Vec<u8> {
     stv_bytes(strength, confidence)
 }
 
-fn collect_evidence(bytes: &[u8], out: &mut BTreeSet<Vec<u8>>) {
+fn visit_evidence<'a>(
+    bytes: &'a [u8],
+    visitor: &mut impl FnMut(&'a [u8]) -> bool,
+) -> bool {
     if is_symbol(bytes, "pnil") {
-        return;
+        return true;
     }
-    if let Tag::Arity(_) = byte_item(bytes[0]) {
-        let args = expr_args(bytes);
-        if args.len() == 3 && is_symbol(args[0], "pcons") {
-            collect_evidence(args[1], out);
-            collect_evidence(args[2], out);
-            return;
-        }
+    if let Some([name, item, tail]) = expr_args_exact::<3>(bytes)
+        && is_symbol(name, "pcons")
+    {
+        return visit_evidence(item, visitor) && visit_evidence(tail, visitor);
     }
-    out.insert(bytes.to_vec());
+    visitor(bytes)
+}
+
+fn collect_evidence(bytes: &[u8], out: &mut BTreeSet<Vec<u8>>) {
+    visit_evidence(bytes, &mut |item| {
+        out.insert(item.to_vec());
+        true
+    });
 }
 
 fn evidence_set(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
@@ -1091,111 +1098,199 @@ fn pattern_instance(pattern: &[u8], value: &[u8]) -> bool {
 }
 
 fn evidence_contains_rule(evidence: &[u8], rule: &[u8], allow_instance: bool) -> bool {
-    evidence_set(evidence).iter().any(|item| {
+    let mut found = false;
+    visit_evidence(evidence, &mut |item| {
         if let Tag::Arity(_) = byte_item(item[0]) {
-            let args = expr_args(item);
-            args.len() == 2
-                && is_symbol(args[0], "rule-ev")
-                && (alpha_equiv(args[1], rule)
-                    || (allow_instance && pattern_instance(rule, args[1])))
+            if let Some([name, evidence_rule]) = expr_args_exact::<2>(item)
+                && is_symbol(name, "rule-ev")
+                && (alpha_equiv(evidence_rule, rule)
+                    || (allow_instance && pattern_instance(rule, evidence_rule)))
+            {
+                found = true;
+                return false;
+            }
+            true
         } else {
-            false
+            true
         }
-    })
+    });
+    found
 }
 
-fn evidence_list(set: &BTreeSet<Vec<u8>>) -> Vec<u8> {
-    let mut out = symbol_bytes("pnil");
-    for item in set.iter().rev() {
-        let mut next = Vec::new();
-        push_expr(&mut next, "pcons", &[item, &out]);
-        out = next;
+fn evidence_list(items: &[&[u8]]) -> Vec<u8> {
+    const PCONS_PREFIX_LEN: usize = 1 + 1 + 5;
+    const PNIL_LEN: usize = 1 + 4;
+    let mut out = Vec::with_capacity(
+        PNIL_LEN
+            + items
+                .iter()
+                .map(|item| PCONS_PREFIX_LEN + item.len())
+                .sum::<usize>(),
+    );
+    for item in items {
+        out.push(item_byte(Tag::Arity(3)));
+        out.push(item_byte(Tag::SymbolSize(5)));
+        out.extend_from_slice(b"pcons");
+        out.extend_from_slice(item);
     }
+    out.push(item_byte(Tag::SymbolSize(4)));
+    out.extend_from_slice(b"pnil");
     out
 }
 
 fn evidence_union(left: &[u8], right: &[u8]) -> Vec<u8> {
-    let mut set = evidence_set(left);
-    set.extend(evidence_set(right));
-    evidence_list(&set)
+    let mut count = 0;
+    visit_evidence(left, &mut |_| {
+        count += 1;
+        true
+    });
+    visit_evidence(right, &mut |_| {
+        count += 1;
+        true
+    });
+    let mut items = Vec::with_capacity(count);
+    visit_evidence(left, &mut |item| {
+        items.push(item);
+        true
+    });
+    if !items.is_sorted() {
+        items.sort_unstable();
+    }
+    items.dedup();
+    visit_evidence(right, &mut |item| {
+        if let Err(index) = items.binary_search(&item) {
+            items.insert(index, item);
+        }
+        true
+    });
+    evidence_list(&items)
 }
 
 fn is_expr_head(bytes: &[u8], name: &str) -> bool {
-    if let Tag::Arity(_) = byte_item(bytes[0]) {
-        let args = expr_args(bytes);
-        !args.is_empty() && is_symbol(args[0], name)
-    } else {
-        false
-    }
+    matches!(byte_item(bytes[0]), Tag::Arity(_))
+        && expr_args_iter(bytes)
+            .next()
+            .is_some_and(|head| is_symbol(head, name))
 }
 
 fn evidence_dependent(left: &[u8], right: &[u8]) -> bool {
-    let left = evidence_set(left);
-    evidence_set(right)
-        .iter()
-        .any(|item| left.contains(item) && is_expr_head(item, "rule-ev"))
+    let mut dependent = false;
+    visit_evidence(right, &mut |right_item| {
+        if !is_expr_head(right_item, "rule-ev") {
+            return true;
+        }
+        visit_evidence(left, &mut |left_item| {
+            if left_item == right_item {
+                dependent = true;
+                false
+            } else {
+                true
+            }
+        });
+        !dependent
+    });
+    dependent
 }
 
 fn evidence_overlaps(left: &[u8], right: &[u8]) -> bool {
-    let left = evidence_set(left);
-    evidence_set(right).iter().any(|item| left.contains(item))
+    let mut overlaps = false;
+    visit_evidence(right, &mut |right_item| {
+        visit_evidence(left, &mut |left_item| {
+            if left_item == right_item {
+                overlaps = true;
+                false
+            } else {
+                true
+            }
+        });
+        !overlaps
+    });
+    overlaps
 }
 
 fn inheritance_rule_source(rule: &[u8]) -> Option<&[u8]> {
-    if !matches!(byte_item(rule[0]), Tag::Arity(_)) {
-        return None;
-    }
-    let args = expr_args(rule);
-    let head = if args.len() == 2 && matches!(byte_item(args[0][0]), Tag::Arity(_)) {
-        args[0]
+    let [first, _second] = expr_args_exact::<2>(rule)?;
+    let head = if matches!(byte_item(first[0]), Tag::Arity(_)) {
+        first
     } else {
         rule
     };
-    let head_args = expr_args(head);
-    (head_args.len() == 2 && is_symbol(head_args[0], "inheritance-implication"))
-        .then_some(head_args[1])
+    let [name, source] = expr_args_exact::<2>(head)?;
+    is_symbol(name, "inheritance-implication").then_some(source)
 }
 
 fn evidence_uses_inheritance_source(evidence: &[u8], proof: &[u8]) -> bool {
-    evidence_set(evidence).iter().any(|item| {
+    let mut uses_source = false;
+    visit_evidence(evidence, &mut |item| {
         if !matches!(byte_item(item[0]), Tag::Arity(_)) {
+            return true;
+        }
+        if let Some([name, rule]) = expr_args_exact::<2>(item)
+            && is_symbol(name, "rule-ev")
+            && inheritance_rule_source(rule).is_some_and(|source| alpha_equiv(source, proof))
+        {
+            uses_source = true;
             return false;
         }
-        let args = expr_args(item);
-        args.len() == 2
-            && is_symbol(args[0], "rule-ev")
-            && inheritance_rule_source(args[1]).is_some_and(|source| alpha_equiv(source, proof))
-    })
+        true
+    });
+    uses_source
 }
 
 fn evidence_equal(left: &[u8], right: &[u8]) -> bool {
-    evidence_set(left) == evidence_set(right)
+    let subset = |source: &[u8], target: &[u8]| {
+        let mut all_present = true;
+        visit_evidence(source, &mut |source_item| {
+            let mut present = false;
+            visit_evidence(target, &mut |target_item| {
+                if source_item == target_item {
+                    present = true;
+                    false
+                } else {
+                    true
+                }
+            });
+            if !present {
+                all_present = false;
+            }
+            present
+        });
+        all_present
+    };
+    subset(left, right) && subset(right, left)
 }
 
 fn evidence_alpha_equal(left: &[u8], right: &[u8]) -> bool {
-    let left = evidence_set(left);
-    let right = evidence_set(right);
-    left.len() == right.len()
-        && left
+    let mut left_items = Vec::new();
+    let mut right_items = Vec::new();
+    visit_evidence(left, &mut |item| {
+        if !left_items.contains(&item) {
+            left_items.push(item);
+        }
+        true
+    });
+    visit_evidence(right, &mut |item| {
+        if !right_items.contains(&item) {
+            right_items.push(item);
+        }
+        true
+    });
+    left_items.len() == right_items.len()
+        && left_items
             .iter()
-            .all(|item| right.iter().any(|candidate| alpha_equiv(item, candidate)))
+            .all(|item| right_items.iter().any(|candidate| alpha_equiv(item, candidate)))
 }
 
 fn inversion_proof_parts(proof_id: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
-    if !matches!(byte_item(proof_id[0]), Tag::Arity(_)) {
-        return None;
+    let [name, goal, rule, evidence] = expr_args_exact::<4>(proof_id)?;
+    if is_symbol(name, "scheduledInvN") {
+        return Some((goal, rule, evidence));
     }
-    let args = expr_args(proof_id);
-    if args.len() != 4 {
-        return None;
-    }
-    if is_symbol(args[0], "scheduledInvN") {
-        return Some((args[1], args[2], args[3]));
-    }
-    if is_symbol(args[0], "scheduledN") {
-        let rule = expr_args(args[2]);
-        if rule.len() == 3 && is_symbol(rule[0], "inv") {
-            return Some((args[1], rule[1], args[3]));
+    if is_symbol(name, "scheduledN") {
+        if let Some([kind, inverse, _]) = expr_args_exact::<3>(rule)
+            && is_symbol(kind, "inv")
+        {
+            return Some((goal, inverse, evidence));
         }
     }
     None
@@ -1205,26 +1300,34 @@ fn is_generated_inheritance_view_proof(proof_id: &[u8]) -> bool {
     if !matches!(byte_item(proof_id[0]), Tag::Arity(_)) {
         return false;
     }
-    let args = expr_args(proof_id);
-    if args.is_empty() {
+    let mut args = expr_args_iter(proof_id);
+    let Some(name) = args.next() else {
         return false;
-    }
-    if is_symbol(args[0], "scheduledInvN") {
+    };
+    if is_symbol(name, "scheduledInvN") {
         return true;
     }
-    is_symbol(args[0], "scheduledN")
-        && args.len() >= 3
-        && (is_expr_head(args[2], "stv-prior") || is_expr_head(args[2], "inv"))
+    if !is_symbol(name, "scheduledN") {
+        return false;
+    }
+    let Some(rule) = args.nth(1) else {
+        return false;
+    };
+    is_expr_head(rule, "stv-prior") || is_expr_head(rule, "inv")
 }
 
 fn is_inheritance_refutation_proof(proof_id: &[u8]) -> bool {
     if !matches!(byte_item(proof_id[0]), Tag::Arity(_)) {
         return false;
     }
-    let args = expr_args(proof_id);
-    args.len() >= 3
-        && is_symbol(args[0], "scheduledN")
-        && is_expr_head(args[2], "mp-conclusion-not")
+    let mut args = expr_args_iter(proof_id);
+    let Some(name) = args.next() else {
+        return false;
+    };
+    is_symbol(name, "scheduledN")
+        && args
+            .nth(1)
+            .is_some_and(|rule| is_expr_head(rule, "mp-conclusion-not"))
 }
 
 fn proof_identity_equal(left: &ProofRow, right: &ProofRow) -> bool {
